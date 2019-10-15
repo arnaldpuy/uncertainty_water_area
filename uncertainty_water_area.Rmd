@@ -1,6 +1,6 @@
 ---
 title: "What is the relation between irrigated areas and irrigation water withdrawal?"
-author: "Arnald Puy, Simon Levin, Samuele Lo Piano and Andrea Saltelli"
+author: "Arnald Puy et al."
 header-includes:
   - \usepackage[font=footnotesize]{caption}
   - \usepackage{dirtytalk}
