@@ -1,0 +1,862 @@
+---
+title: "What is the relation between irrigated areas and irrigation water withdrawal?"
+author: "Arnald Puy, Simon Levin, Samuele Lo Piano and Andrea Saltelli"
+header-includes:
+  - \usepackage[font=footnotesize]{caption}
+  - \usepackage{dirtytalk}
+  - \usepackage{booktabs}
+  - \usepackage{tabulary}
+  - \usepackage{enumitem}
+  - \usepackage{lmodern}
+  - \usepackage[T1]{fontenc}
+output:
+  pdf_document:
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 2
+    keep_tex: true
+  word_document:
+    toc: no
+    toc_depth: '2'
+link-citations: yes
+fontsize: 11pt
+bibliography: 
+  - /Users/arnald/Documents/bibtex/R_packages.bib
+  - /Users/arnald/Documents/bibtex/LATEX_water_withdrawal.bib
+  - /Users/arnald/Documents/bibtex/LATEX_population.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+\newpage 
+
+# Introduction
+
+Current figures suggest that irrigated agriculture consumes c. 70\% of all freshwater resources. The total amount of water used by irrigation agriculture is determined by 
+factors such as soil hydraulic parameters, crop types, the weather or the irrigated area [@Wisser2008], with the latter being especially influential [@Puy2017]. It is thus relevant to empirically describe the relationship between the irrigated area and the volume of water required for irrigation: what happens when we increase the total extension of irrigation?  does the demand for irrigation water increase proportionally, or in a non-linear fashion? Are small irrigated areas more water efficient, or do they disproportionally require more water than large ones?
+
+# Materials and methods
+
+Here we aim at tackling these questions. Let us first create a wrapper function that allows to load all the required `R` libraries in one go. We then load the package `checkpoint` [@MicrosoftCorporation2018], which installs in a local directory the same package versions used in the study. This allows anyone that runs our code to fully reproduce our results anytime. Finally, we cast a function to define the theme of the figures we will plot to present our results.
+
+```{r load_packages, results="hide", message=FALSE, warning=FALSE}
+
+# LOAD PACKAGES ---------------------------------------------------------------
+
+# Function to read in all required packages in one go:
+loadPackages <- function(x) {
+  for(i in x) {
+    if(!require(i, character.only = TRUE)) {
+      install.packages(i, dependencies = TRUE)
+      library(i, character.only = TRUE)
+    }
+  }
+}
+
+loadPackages(c("data.table", "ggplot2", "sensobol", "scales",
+               "ncdf4", "rworldmap", "sp", "countrycode", 
+               "dplyr", "IDPmisc", "boot", "parallel", 
+               "MASS", "doParallel", "complmrob", 
+               "mvoutlier", "sandwich", "lmtest", "mice"))
+
+# SET CHECKPOINT --------------------------------------------------------------
+
+dir.create(".checkpoint")
+
+library("checkpoint")
+
+checkpoint("2019-09-10", 
+           R.version ="3.6.1", 
+           checkpointLocation = getwd())
+
+# CUSTOM FUNCTION TO DEFINE THE PLOT THEMES -----------------------------------
+
+theme_AP <- function() {
+  theme_bw() +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.background = element_rect(fill = "transparent",
+                                           color = NA),
+          legend.key = element_rect(fill = "transparent",
+                                    color = NA))
+}
+```
+
+Since we will need to read in several global datasets and clean the data before conducting any test, we define here several functions to that aim. Firstly, the function `country_code` will ensure that all countries receive the same name across datasets. Secondly, the `coords2country` function will translate coordinatesinto the country name. Finally, the `get_nc` function will allow to read in `.nc` files, a format widely used to store spatially explicit data on irrigation water withdrawal.
+
+```{r functions_data, cache=TRUE}
+
+# CREATE FUNCTIONS ------------------------------------------------------------
+
+# Function to obtain UN code, Continent and Country names
+country_code <- function(dt) {
+  dt[, `:=` (Code = countrycode(dt[, Country], 
+                                origin = "country.name", 
+                                destination = "un"), 
+             Continent = countrycode(dt[, Country], 
+                                     origin = "country.name", 
+                                     destination = "continent"))]
+  dt[, Country:= countrycode(dt[, Code], 
+                             origin = "un", 
+                             destination = "country.name")]
+  setcolorder(dt, c("Country", "Continent", "Code", "Water.Withdrawn"))
+  return(dt)
+}
+
+## Function to transform longitude and latitude to country.
+# It is borrowed from Andy:
+# https://stackoverflow.com/questions/14334970/convert-latitude-and-longitude-coordinates-to-country-name-in-r)
+coords2country = function(points) {  
+  countriesSP <- rworldmap::getMap(resolution = 'low')
+  pointsSP = sp::SpatialPoints(points, proj4string=CRS(proj4string(countriesSP)))  
+  indices = sp::over(pointsSP, countriesSP)
+  indices$ADMIN  
+  #indices$ISO3 # returns the ISO3 code 
+  #indices$continent   # returns the continent (6 continent model)
+  #indices$REGION   # returns the continent (7 continent model)
+}
+
+# Function to load and extract data from .nc files
+get_nc_data <- function(nc_file) {
+  nc <- nc_open(nc_file)
+  ww <- ncvar_get(nc, "withd_irr")
+  lon <- ncvar_get(nc, "lon")
+  lat <- ncvar_get(nc, "lat")
+  water <- rowSums(ww[, 469:ncol(ww)]) # Obtain year values for 2010 only
+  ww.df <- data.frame(cbind(lon, lat, water)) 
+  countries <- coords2country(ww.df[1:nrow(ww.df), 1:2])
+  df <- cbind(countries, ww.df)
+  setDT(df)
+  final <- df[, .(Water.Withdrawn = sum(water)), countries]
+  setnames(final, "countries", "Country")
+  country_code(final)
+  out <- na.omit(final[order(Continent)])
+  out[, Water.Withdrawn:= Water.Withdrawn / 1000] # From mm to m
+  return(out)
+}
+```
+
+## Irrigation water withdrawal datasets
+
+There are several datasets and Global Hydrological Models (GHM) providing information on irrigation water withdrawal at the country level, with significant differences on the values reported. Here we consider this source of uncertainty through the following datasets:
+\begin{enumerate}
+\item The WaterGap GHM [@Doll2002].
+\item The LPJmL GHM.
+\item The H08 GHM.
+\item The PCR-GLOBWB GHM.
+\item FAOSTAT irrigation water withdrawal (Table 4).
+\item @Liu2016a dataset (Aquastat dataset with all the missing values filled).
+\end{enumerate}
+In the next code chunk we read in all these datasets, clean them and merge them to obtain a final dataset with all the data on irrigation water withdrawal merged.
+
+```{r water_with_dataset, cache=TRUE, warning=FALSE}
+
+# READ IN DATASETS ON IRRIGATION WATER WITHDRAWAL -----------------------------
+
+# FAO data (Table 4) ----------------------------
+# http://www.fao.org/nr/water/aquastat/water_use_agr/IrrigationWaterUse.pdf
+
+table4.tmp <- fread("table_4.csv", skip = 3, nrows = 167) %>%
+  .[, .(Country, Year, Water.withdrawal)] %>%
+  setnames(., "Water.withdrawal", "Water.Withdrawn")
+
+# Extract the selected years
+table4.dt <- country_code(table4.tmp[Year %in% 1999:2012])[
+  , Water.Dataset:= "Table 4"][
+    , Year:= NULL]
+
+# Liu et al. dataset ----------------------------
+liu.dt <- fread("liu.csv")[, .(country, irr)] %>%
+  setnames(., c("country", "irr"), c("Country", "Water.Withdrawn")) %>%
+  country_code(.) %>%
+  .[, Water.Dataset:= "Liu et al. 2016"]
+
+# Huang et al datasets --------------------------
+names_nc_files <- c("withd_irr_lpjml.nc", "withd_irr_pcrglobwb.nc", 
+                    "withd_irr_h08.nc", "withd_irr_watergap.nc")
+out.nc <- lapply(names_nc_files, function(x) get_nc_data(x))
+names(out.nc) <- c("LPJmL", "PCR-GLOBWB", "H08", "WaterGap")
+
+GHM.dt <- rbindlist(out.nc, idcol = "Water.Dataset") %>%
+  .[order(Country)]
+```
+
+Not all irrigation water withdrawal datasets provide measurements for the same countries. This means that any computation conducted using a given dataset risks being biased by the specific countries included in it. In order to tackle this source of uncertainty, all datasets should include the same countries, regardless of whether there is a measurement available for the country in question. Later on the uncertainties related with the imputation of missing values will be dealt with. For now, we extract a vector with the name of all the different countries mentioned by any of the irrigated water withdrawal datasets, and merge it with each single water withdrawal dataset - missing values will be for the moment treated as `NA`.
+
+```{r arrange_total_countries, cache=TRUE, dependson="water_with_dataset"}
+
+# ARRANGE THE TOTAL NUMBER OF COUNTRIES ---------------------------------------
+
+# Check how many different countries there are in the water datasets
+DT <- data.table(unique(c(liu.dt[, Country], GHM.dt[, Country], table4.dt[, Country])))
+setnames(DT, "V1", "Country")
+
+# Give standard country names, UN codes and link with Continent
+DT <- DT[, `:=` (Code = countrycode(DT[, Country], 
+                                    origin = "country.name", 
+                                    destination = "un"), 
+                 Continent = countrycode(DT[, Country], 
+                                         origin = "country.name", 
+                                         destination ="continent"))]
+
+DT <- DT[, Country:= countrycode(DT[, Code], 
+                                 origin = "un", 
+                                 destination = "country.name")]
+```
+
+```{r final_water_dataset, cache=TRUE, dependson=c("water_with_dataset" ,"arrange_total_countries")}
+
+# CREATE THE FINAL IRRIGATION WATER WITHDRAWAL DATASET ------------------------
+
+# Merge with the Country vector
+tmp <- GHM.dt[, merge(.SD, DT, by = c("Country", "Code", "Continent"), 
+                      all.y = TRUE), by = Water.Dataset]
+
+# Check whether there are duplicated Countries
+tmp[tmp[, duplicated(Country), Water.Dataset][, V1]]
+
+# Get mean values for the duplicated Countries
+GHM.dt.full <- tmp[, .(Water.Withdrawn = mean(Water.Withdrawn)), 
+                   .(Water.Dataset, Country, Code, Continent)]
+
+# Arrange Liu data set
+liu.dt.full <- merge(DT, liu.dt, 
+                     by = c("Country", "Code", "Continent"), 
+                     all.x = TRUE) %>%
+  .[, Water.Dataset:= ifelse(is.na(Water.Dataset), 
+                             "Liu et al. 2016", 
+                             Water.Dataset)]
+
+# Arrange Table 4 dataset
+table4.dt.full <- merge(DT, table4.dt, 
+                        by = c("Country", "Code", "Continent"), 
+                        all.x = TRUE) %>%
+  .[, Water.Dataset:= ifelse(is.na(Water.Dataset), 
+                             "Table 4", 
+                             Water.Dataset)]
+
+# Obtain final irrigation water withdrawal dataset
+water.dt <- rbind(liu.dt.full, table4.dt.full, GHM.dt.full)
+```
+
+## Irrigated area datasets
+
+There are also several datasets informing on the extension of irrigation at the country level, with large uncertainties (sometimes the values differ for more than one order of magnitude). Here we use the data compiled by @Meier2018, which also includes the datasets by Aquastat [@FAO2016b], FAOSTAT [@FAO2017a],  @Siebert2013, @Salmon2015 and @Thenkabail2009.
+
+```{r area_dataset, cache=TRUE}
+
+# READ IN IRRIGATED AREA DATASETS ---------------------------------------------
+
+meier.dt <- fread("meier.csv") %>%
+  setnames(., "Codes", "Code")
+```
+
+Finally, we bind the datasets on irrigation water withdrawal and irrigated area, and obtain the full dataset we will use in our analysis. We also plot the data, which evidences that irrigation water withdrawal and irrigated area are indeed related (Fig. 1). The last code chunk log-transforms these parameters to ease the interpretation of the results and prepare the dataset for the upcoming analysis.
+
+```{r merge_with_area, cache=TRUE, dependson=c("area_dataset", "water_with_dataset", "final_water_dataset")}
+
+# MERGE DATASETS --------------------------------------------------------------
+
+irrigated.area.datasets <- colnames(meier.dt)[-c(1:3)]
+
+irrigated.dt <- melt(meier.dt, measure.vars = irrigated.area.datasets) %>%
+  .[, merge(.SD, DT, by = c("Country", "Code", "Continent"), 
+            all.y = TRUE), by = variable] %>%
+  setnames(., c("variable", "value"), c("Area.Dataset", "Irrigated.Area"))
+
+full.dt <- merge(irrigated.dt, water.dt, on = c("Continent", "Country", "Code"), 
+                 allow.cartesian = TRUE) %>%
+  .[!Continent == "Oceania"] # Drop Oceania
+```
+
+```{r plot_merged, cache=TRUE, dependson="merge_with_area", dev="tikz", fig.height=8, fig.width=7, fig.cap="Scatter plots of irrigated areas (x-axis) against irrigation water withdrawal (y-axis). All the possible combinations of datasets are shown."}
+
+# PLOT ------------------------------------------------------------------------
+
+full.dt %>%
+  ggplot(., aes(Irrigated.Area, Water.Withdrawn, 
+                color = Continent)) +
+  geom_point(size = 0.8) +
+  scale_x_log10(breaks = trans_breaks("log10", function(x) 10 ^ (2 * x)),
+                labels = trans_format("log10", math_format(10 ^ .x))) +
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10 ^ x),
+                labels = trans_format("log10", math_format(10 ^ .x))) +
+  labs(x = "Irrigated area (Mha)", 
+       y = expression(paste("Water withdrawal", "", 10^9, m^3/year))) +
+  facet_grid(Water.Dataset ~ Area.Dataset) +
+  theme_AP() +
+  theme(legend.position = "top")
+```
+
+```{r log10, cache=TRUE, dependson="merge_with_area"}
+
+# TRANSFORM DATASET -----------------------------------------------------------
+
+cols <- c("Water.Withdrawn", "Irrigated.Area")
+col_names <- c("Continent", "Water.Dataset", "Area.Dataset", "Regression", 
+               "Imputation.Method", "Iteration")
+cols_group <- c("Continent", "Area.Dataset", "Water.Dataset")
+full.dt <- full.dt[, (cols):= lapply(.SD, log10), .SDcols = (cols)]
+```
+
+## Assesment of uncertainties in the model structure
+
+As shown in Fig. 1, there is a clear relation between irrigated areas and irrigation water withdrawal, more or less sharp depending on which combination of datasets are used. This relationship is prone to be described by OLS regressions, and the resulting slope be used to ascertain whether irrigation water withdrawal tends to scale superlinearly ($\beta > 1$) or sublinearly ($\beta < 1$) for every increase in the area under irrigation. However, besides the uncertainty derived from the different measurements of irrigated area and irrigation water withdrawal available, there is uncertainty with regards to the selected model structure for OLS: robust/non-robust approaches to correct for outliers, whether a correction for heteroskedasticity is needed, which methodology is used to imput missing values, and uncertainty with regards to the true value of $\beta$.
+
+Hereafter we explore the first three sources of uncertainty just mentioned. 
+
+### Multivariate outliers
+
+We first check the existence of bivariate outliers using Mahalanobis classic and robust distances [@Filzmoser2005]. The results, which are presented in Fig. 2, confirm the presence of extreme values and justify the use of a trigger to decide whether to use robust or non-robust regression methods.
+
+```{r outliers, cache=TRUE, fig.keep="none", echo=FALSE,results='hide', dependson="log10"}
+
+# CHECK OUTLIERS -------------------------------------------------------------
+
+tmp <- NaRV.omit(full.dt)[, dd.plot(.SD), .SDcols = cols, cols_group]
+```
+
+```{r plot_outliers, cache=TRUE, dependson="outliers", dev="tikz", fig.height=8.5, fig.width=6.5, fig.cap="Bivariate outliers."}
+
+# PLOT OUTLIERS ---------------------------------------------------------------
+
+ggplot(tmp, aes(md.cla, md.rob, 
+                shape = outliers, 
+                color = Continent)) +
+  geom_point() +
+  scale_shape_manual(name = "Outlier", 
+                     labels = c("No", "Yes"), 
+                     values = c(16, 4)) +
+  facet_grid(Water.Dataset ~ Area.Dataset) +
+  labs(x = "Mahalanobis distance", 
+       y = "Robust distance") +
+  theme_AP() +
+  theme(legend.position = "top")
+```
+
+### Heteroskedasticity
+
+In order to see whether the data exhibits heteroskedasticity, we compute OLS regressions for each combination of irrigated area and water withdrawal dataset, and plot the residual against the fitted values. The results are plotted in Figs 3-6. As can be seen, the variance is not constant for some specific combinations of datasets. This justifies including the correction for heteroskedasticity as a source of structural uncertainty in the computation of the regression equations.
+
+```{r hetero, cache=TRUE, dependson="merge_with_area"}
+
+# CHECK HETEROSKEDASTICITY ----------------------------------------------------
+
+hetero <- NaRV.omit(full.dt)[, .(model = .(lm(Water.Withdrawn ~ Irrigated.Area))), cols_group]
+```
+
+```{r hetero_plot, cache=TRUE, dependson="hetero", dev="tikz", fig.height=8.5, fig.width=6.5, fig.cap="Residual versus fitted values."}
+
+# PLOT HETEROSKEDASTICITY ----------------------------------------------------
+
+tmp <- hetero[, c("resid" = lapply(model, residuals), 
+                  "pred" = lapply(model, fitted)), cols_group]
+
+hetero.plot <- split(tmp, tmp$Continent)
+
+gg <- list()
+for(i in names(hetero.plot)) {
+  gg[[i]] <- ggplot(hetero.plot[[i]], aes(pred, resid)) +
+    geom_point() +
+    facet_grid(Area.Dataset ~ Water.Dataset) +
+    theme_AP() +
+    labs(x = "Fitted", 
+         y = "Residual") +
+    geom_hline(yintercept = 0, 
+               lty = 2) +
+    ggtitle(names(hetero.plot[i]))
+}
+
+gg
+```
+
+### Missing values
+
+There are several methods to impute missing values, each with its specificities. The selection of the imputation method might therefore influence the results of the model. In this study we will take into account this source of structural uncertainty by analysing the effects of three different imputation methods: linear regression (`norm.predict`), stochastic regression (`norm.nob`) and random forest (`rf`). Since these imputation models are based on random sampling, we should also study the influence of randomness in the obtention of the final imputed missing value. Here we check that source of uncertainty by limiting the random sampling to 5 different imputed data sets for each imputation method.
+
+```{r missing_values, cache=TRUE, dependson="log10", echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+
+# IMPUTATION OF MISSING VALUES ------------------------------------------------
+
+# Substitute Inf values for NA
+for (j in 1:ncol(full.dt)) set(full.dt, which(is.infinite(full.dt[[j]])), j, NA)
+
+full.dt[, lapply(.SD, function(x) sum(is.infinite(x)))] # Check
+
+# Imputation settings
+m.iterations <- 5
+imputation.methods <- c("rf", "norm.boot", "norm.nob")
+set.seed(10) # Set seed to allow for replication
+
+# Run
+imput <- full.dt[, .(Group = lapply(imputation.methods, function(x) 
+  mice(.SD, m = m.iterations, maxit = m.iterations, method = x, seed = 500, 
+       print = FALSE))), 
+  cols_group]
+
+imput <- imput[, Imputation.Method:= rep(imputation.methods, .N / 3)]
+
+# Extract iterations
+imput <- imput[, Datasets:= lapply(Group, function(x) 
+  lapply(1:m.iterations, function(y) data.table(complete(x, y))))] %>%
+  .[, Data:= lapply(Datasets, function(x) rbindlist(x, idcol = "Iteration"))]
+
+# Vector to loop onto
+columns_add <- c("Country", "Iteration", "Irrigated.Area", "Water.Withdrawn")
+tmp <- as.list(columns_add)
+names(tmp) <- columns_add
+
+# Extract columns
+for(i in names(tmp)) {
+  imput <- imput[, tmp[[i]]:= lapply(.SD, function(x) 
+    lapply(x, function(y) y[, ..i])), .SDcols = "Data"]
+}
+
+# Unlist
+full.imput <- imput[, lapply(.SD, unlist), 
+                    .SDcols = columns_add, 
+                    .(Continent, Area.Dataset, Water.Dataset, Imputation.Method)]
+```
+
+# Bootstrap regressions
+
+In this section we bootstrap ($R=500$) the regression models in each combination of irrigated area dataset (trigger X1), irrigation water withdrawal dataset (trigger X2), linear regression method (robust/non-robust/heteroskedasticity-corrected; trigger X3), imputation method (trigger X4) and iteration selected (trigger X5). Bootstrap allows to account for an extra source of uncertainty: the true value of $\beta$ (trigger X6). 
+
+```{r set_boot, cache=TRUE, dependson="merge_with_area"}
+
+# PREPARE THE BOOTSTRAP -------------------------------------------------------
+
+# Define number of replicas
+R <- 500
+
+# Set number of cores (75 %)
+n_cores <- floor(detectCores() * 0.75)
+
+# Set grouping vector
+all.cols <- c(cols_group, "Imputation.Method", "Iteration")
+```
+
+## Regular bootstrap
+
+We set the formula to bootstrap the classic OLS regression, and launch the computation. We finally extract the results.
+
+```{r regular_boot, cache=TRUE, dependson = c("set_boot", "missing_values")}
+
+# REGULAR BOOTSTRAP -----------------------------------------------------------
+
+# Function to bootstrap OLS coefficients
+boot.ols <- function(formula, x, i) {
+  d <- x[i, ]
+  out <- coef(lm(formula, data = d))
+  return(out)
+}
+
+# Bootstrap
+ols <- full.imput[, list(list(boot(.SD, 
+                                   statistic = boot.ols, 
+                                   R = R,
+                                   formula = Water.Withdrawn ~ Irrigated.Area,
+                                   parallel = "multicore",
+                                   ncpus = n_cores))), 
+                  all.cols]
+```
+
+```{r extract_results_regular, cache=TRUE, dependson=c("missing_values", "regular_boot")}
+
+# EXTRACT RESULTS -------------------------------------------------------------
+
+ols.dt <- ols[, `:=`("All", list(lapply(V1, function(x) x["t"])))] %>%
+  .[, list(Alpha = lapply(All, function(x) lapply(x, function(y) y[, 1])), 
+           Beta = lapply(All, function(x) lapply(x, function(y) y[, 2]))), 
+    all.cols] %>%
+  .[, lapply(.SD, unlist), .SDcols = c("Alpha", "Beta"), 
+    all.cols] %>%
+  .[, Regression:= "Normal"]
+
+ols.dt <- ols.dt[, Alpha:= NULL]
+```
+
+## Robust bootstrap
+
+We set the formula to bootstrap robust OLS regression (M estimator), and launch the computation. We then extract the results.
+
+```{r robust_boot, cache=TRUE, dependson=c("set_boot", "missing_values")}
+
+# ROBUST BOOTSTRAP ------------------------------------------------------------
+
+# Function to bootstrap robust coefficients
+boot.olsR <- function(formula, x, i) {
+  d <- x[i, ]
+  out <- coef(rlm(formula, data = d))
+  return(out)
+}
+
+# Bootstrap
+olsR <- full.imput[, list(list(boot(.SD, 
+                                   statistic = boot.olsR, 
+                                   R = R,
+                                   formula = Water.Withdrawn ~ Irrigated.Area,
+                                   parallel = "multicore",
+                                   ncpus = n_cores))), 
+                  all.cols]
+```
+
+```{r extract_results_robust, cache=TRUE, dependson="robust_boot"}
+
+# EXTRACT RESULTS -------------------------------------------------------------
+
+olsR.dt <- olsR[, `:=`("All", list(lapply(V1, function(x) x["t"])))] %>%
+  .[, list(Alpha = lapply(All, function(x) lapply(x, function(y) y[, 1])), 
+           Beta = lapply(All, function(x) lapply(x, function(y) y[, 2]))), 
+    all.cols] %>%
+  .[, lapply(.SD, unlist), .SDcols = c("Alpha", "Beta"), 
+    all.cols] %>%
+  .[, Regression:= "Robust"]
+
+olsR.dt <- olsR.dt[, Alpha:= NULL]
+```
+
+## Heteroskedastic Bootstrap
+
+We finally perform an heteroskedasticity-corrected bootstrap as follows: for each linear regression, we calculate the covariance matrix of the coefficients using an heteroskedasticity-consistent estimator (White's estimator). We then extract the upper and lower 95\% confidence intervals, and use them to compute the mean and the standard deviation (assuming an underlying normal distribution). Finally, we use these values to randomly generate normal distributions with size $R$ for each combination of triggers.
+
+```{r hetero_boot, cache=TRUE, dependson= c("log10", "missing_values", "set_boot")}
+
+# HETEROSKEDASTIC BOOTSTRAP ---------------------------------------------------
+
+hetero2 <- full.imput[, .(model = .(lm(Water.Withdrawn ~ Irrigated.Area))), 
+                             all.cols]
+
+hetero.dist <- hetero2[, .(cis = .(lapply(model, function(x) 
+  coefci(x, level = 0.95, vcov. = vcovHC(x, type = "HC1"))))), all.cols]
+
+hetero.dist <- hetero.dist[, ci.min:= lapply(cis, function(x) 
+  lapply(x, function(y) y[2])), all.cols]
+
+hetero.dist <- hetero.dist[, ci.max:= lapply(cis, function(x) 
+  lapply(x, function(y) y[4])), all.cols]
+
+hetero.dist <- hetero.dist[, c("ci.min", "ci.max"):= lapply(.SD, as.numeric), 
+                           .SDcols = c("ci.min", "ci.max")]
+
+hetero.dist <- hetero.dist[, `:=` (mean = (ci.min + ci.max) / 2, 
+                                   sd = (ci.max - ci.min) / 4)]
+
+# Set seed
+set.seed(10)
+
+# Sample
+ols.dt.het <- hetero.dist[, .(Beta = rnorm(n = R, mean = mean, sd = sd)), all.cols] %>%
+  .[, Regression:= "Hetero"]
+```
+
+## Merge results
+
+We bind the results of each bootstrapped regression, and obtained a full dataset with all the replicas.
+
+```{r merge_boot, cache=TRUE, dependson=c("extract_results_robust", "extract_results_regular", "hetero_boot")}
+
+# MERGE REGULAR, ROBUST AND HETEROSKEDASTIC BOOTSTRAP -------------------------
+
+replicas <- rbind(ols.dt, olsR.dt, ols.dt.het)
+```
+
+## Create lookup table
+
+Here we define the lookup table that we will use to select the $\beta$ value according to the conditions set by the triggers in the sample matrix (see below). 
+
+```{r lookup, cache=TRUE, dependson="merge_boot"}
+
+# CREATE LOOKUP TABLE ---------------------------------------------------------
+
+col_names <- c("Continent", "Water.Dataset", "Area.Dataset", 
+               "Regression", "Imputation.Method", "Iteration")
+
+lookup <- replicas[order(Beta), .SD, col_names] %>%
+  .[, ID:= 1:.N, col_names] %>%
+  .[, index:= paste(Continent, Area.Dataset, Water.Dataset,
+                       Regression, Imputation.Method, Iteration, 
+                       ID, sep = "_")] 
+
+lookup <- setkey(lookup, index)
+
+# Export lookup
+fwrite(lookup, "lookup.csv")
+```
+
+# The sample matrix
+
+This section designs the sample matrix that will be used to select the $\beta$ value according to the conditions set by the triggers. Firstly, we pool all irrigated area and water withdrawal datasets and calculate the minimum and maximum values for each of these parameters. This is needed to bound the uniform distributions with which we will characterize $X_1$ and $X_2$ respectively. We also define the size of the sample matrix ($N=2^{14}$), and create a function to transform its columns to their appropriate distributions. 
+
+```{r distributions, cache=TRUE, dependson=c("area_dataset", "water_with_dataset")}
+
+# DEFINE DISTRIBUTIONS --------------------------------------------------------
+
+# Vector with the name of the irrigated area datasets
+irrigated.datasets <- colnames(meier.dt)[4:9]
+
+# Irrigated Area
+irrigated.area <- melt(meier.dt, measure.vars = irrigated.datasets) %>%
+  .[, value:= value / 10 ^ 6] %>%
+  .[, .(Total = sum(value, na.rm = TRUE)), .(Continent, variable)] %>%
+  .[, .(min = min(Total), max = max(Total)), Continent]
+
+# Irrigation water withdrawn
+water.withdrawn <- water.dt[, .(Total = sum(Water.Withdrawn, na.rm = TRUE)), 
+                            .(Continent, Water.Dataset)] %>%
+  .[, .(min = min(Total), max = max(Total)), Continent]
+```
+
+```{r set_sample_matrix, cache=TRUE}
+
+# DEFINE THE SETTINGS OF THE SAMPLE MATRIX ------------------------------------
+
+Continents <- c("Africa", "Americas", "Asia", "Europe")
+
+# Create a vector with the name of the columns
+parameters <- paste("X", 1:6, sep = "")
+
+# Obtain number of parameters
+k <- length(parameters)
+
+# Select sample size
+n <- 2 ^ 14
+
+# Check number of bootstrap samples
+N.boot <- lookup[, .(N = .N), .(Continent, Area.Dataset, Water.Dataset,
+                                Regression, Imputation.Method, Iteration)] %>%
+  .[, N] %>%
+  .[1]
+```
+
+```{r sample_matrix, cache=TRUE, dependson="set_sample_matrix"}
+
+# CREATE THE SAMPLE MATRIX ----------------------------------------------------
+
+# Create an A, B and AB matrices for each continent
+sample.matrix <- lapply(Continents, function(Continents) 
+  sobol_matrices(n = n,
+                 k = k, 
+                 second = TRUE, 
+                 third = TRUE) %>%
+    data.table())
+
+# Name the slots, each is a continent
+names(sample.matrix) <- Continents
+
+# Name the columns
+sample.matrix <- lapply(sample.matrix, setnames, parameters)
+```
+
+```{r transform_sample_matrix, cache=TRUE, dependson=c("sample_matrix", "set_sample_matrix")}
+
+# TRANSFORM THE SAMPLE MATRIX -------------------------------------------------
+
+# Transform the sample matrix
+transform_sample_matrix <- function(dt) {
+  dt[, X1:= floor(X1 * (6 - 1 + 1)) + 1] %>%
+    .[, X1:= ifelse(X1 == 1, "Aquastat", 
+                    ifelse(X1 == 2, "FAOSTAT", 
+                           ifelse(X1 == 3, "Siebert.et.al.2013", 
+                                  ifelse(X1 == 4, "Meier.et.al.2018", 
+                                         ifelse(X1 == 5, "Salmon.et.al.2015", 
+                                                "Thenkabail.et.al.2009")))))] %>%
+    .[, X2:= floor(X2 * (6 - 1 + 1)) + 1] %>%
+    .[, X2:= ifelse(X2 == 1, "LPJmL", 
+                    ifelse(X2 == 2, "H08", 
+                           ifelse(X2 == 3, "PCR-GLOBWB", 
+                                  ifelse(X2 == 4, "WaterGap", 
+                                         ifelse(X2 == 5, "Table 4", 
+                                                "Liu et al. 2016")))))] %>%
+    .[, X3:= floor(X3 * (3 - 1 + 1)) + 1] %>%
+    .[, X3:= ifelse(X3==1, "Normal", 
+                    ifelse(X3 == 2, "Robust", "Hetero"))] %>%
+    .[, X4:= floor(X4 * (length(imputation.methods) - 1 + 1)) + 1] %>%
+    .[, X4:= ifelse(X4 == 1, imputation.methods[1], 
+                    ifelse(X4 == 2, imputation.methods[2], imputation.methods[3]))] %>%
+    .[, X5:= floor(X5 * (m.iterations - 1 + 1)) + 1] %>%
+    .[, X6:= floor(X6 * (N.boot - 1)) + 1]
+}
+
+sample.matrix <- lapply(sample.matrix, transform_sample_matrix)
+sample.matrix.dt <- rbindlist(sample.matrix, idcol = "Continent")
+
+fwrite(sample.matrix.dt, "sample.matrix.dt.csv")
+```
+
+# The model
+
+The model is simply a one-line function that searches in the lookup table the $\beta$ value defined by the triggers of the sample matrix. In order to speed up the computation, we use parallel computing. 
+
+```{r define_model, cache=TRUE}
+
+# THE MODEL -------------------------------------------------------------------
+
+model <- function(X) lookup[.(paste0(X[, 1:7], collapse = "_"))][, Beta]
+```
+
+```{r run_model, cache=TRUE, dependson=c("define_model", "set_boot", "lookup", "transform_sample_matrix")}
+
+# RUN THE MODEL---------------------------------------------------------------
+
+# Create cluster
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+# Run model in parallel
+Y <- foreach(i=1:nrow(sample.matrix.dt),
+             .packages = "data.table") %dopar%
+  {
+    model(sample.matrix.dt[i])
+  }
+
+# Stop parallel cluster
+stopCluster(cl)
+```
+
+```{r arrange_output, cache=TRUE, dependson="run_model"}
+
+# ARRANGE MODEL OUTPUT -------------------------------------------------------
+
+sample.matrix.dt <- sample.matrix.dt[, Y:= as.numeric(cbind(Y))]
+
+# Select the A and B matrix only (for uncertainty analysis)
+AB.dt <- sample.matrix.dt[, .SD[1:(n * 2)], Continent]
+
+# Export results
+fwrite(sample.matrix.dt, "sample.matrix.dt.csv")
+fwrite(AB.dt, "AB.dt.csv")
+```
+
+# Uncertainty analysis
+
+Here we plot the distribution of $\beta$ for each continent, and calculate the proportion of model runs with $\beta<1$ (sublinear regime; larger irrigated areas are more water efficient) and $\beta>1$ (superlinear regime, larger irrigated areas are less water efficient). The results suggest that there are almost 9/10 chances and 3/4 chances of larger irrigated areas in Asia and Europe being more water efficient than smaller ones. In the case of the Americas and Africa, the chances are 3.5/5 and 1/2 respectively.
+
+```{r plot_uncertainty, cache=TRUE, dependson="arrange_output", dev="tikz", fig.height=4, fig.width=5, fig.cap="Uncertainty in the model output."}
+
+# PLOT UNCERTAINTY ------------------------------------------------------------
+
+ggplot(AB.dt, aes(Y, fill = Continent)) + 
+  geom_density(alpha = 0.3) + 
+  theme_AP() +
+  geom_vline(xintercept = 1, 
+             lty = 2) +
+  labs(x = "$\\beta$", 
+       y = "Density") +
+  theme(legend.position = "top")
+```
+
+```{r super_sub, cache=TRUE, dependson="arrange_output"}
+
+# SUPERLINEAR OR SUBLINEAR REGIME? --------------------------------------------
+
+AB.dt[, .(sublinear = sum(Y < 1, na.rm = TRUE) / .N, 
+          superlinear = sum(Y > 1, na.rm = TRUE) / .N), 
+      Continent]
+```
+
+# Sensitivity analysis
+
+```{r sensitivity_settings, cache=TRUE}
+
+# SENSITIVITY SETTINGS --------------------------------------------------------
+
+# Number of bootstrap replicas
+R <- 1000
+
+# Sensitivity estimator
+estimator <- "jansen"
+
+# Method to calculate ci
+type <- "norm"
+
+# Confidence interval
+conf <- 0.95
+```
+
+```{r sensitivity, cache=TRUE, dependson=c("arrange_output", "set_sample_matrix")}
+
+# SENSITIVITY ANALYSIS --------------------------------------------------------
+
+# Compute Sobol' indices up to the third order
+indices <- sample.matrix.dt[, sobol_indices(Y, 
+                                            params = parameters, 
+                                            R = R, 
+                                            n = n, 
+                                            type = estimator,
+                                            parallel = "multicore", 
+                                            ncpus = n_cores, 
+                                            second = TRUE, 
+                                            third = TRUE), 
+                            Continent]
+
+# Compute Sobol' indices for the dummy parameter
+indices.dummy <- sample.matrix.dt[, sobol_dummy(Y, 
+                                                params = parameters, 
+                                                R = R, 
+                                                n = n, 
+                                                parallel = "multicore", 
+                                                ncpus = n_cores), 
+                                  Continent]
+```
+
+```{r ci, cache=TRUE, dependson="sensitivity"}
+
+# COMPUTE CONFIDENCE INTERVALS -----------------------------------------------
+
+# Compute ci for the model parameters
+tmp <- split(indices, indices$Continent)
+ci <- list()
+for(i in names(tmp)) {
+  ci[[i]] <- sobol_ci(tmp[[i]], 
+                      params = parameters,
+                      type = type, 
+                      conf = conf, 
+                      second = TRUE, 
+                      third = TRUE)
+}
+
+ci <- rbindlist(ci, idcol = "Continent") 
+
+# Compute ci for the dummy parameter
+tmp <- split(indices.dummy, indices.dummy$Continent)
+ci.dummy <- list()
+for(i in names(tmp)) {
+  ci.dummy[[i]] <- sobol_ci_dummy(tmp[[i]], 
+                                  type = type, 
+                                  conf = conf)
+}
+
+ci.dummy <- rbindlist(ci.dummy, idcol = "Continent")
+```
+
+```{r plot_sobol, cache=TRUE, dependson="ci", dev="tikz"}
+
+# PLOT SOBOL' INDICES ---------------------------------------------------------
+
+lapply(1:3, function(x) plot_sobol(ci, type = x, dummy = ci.dummy) + 
+         facet_wrap(~Continent, ncol = 4) + 
+         theme(aspect.ratio = 1))
+```
+
+```{r sum_si, cache=TRUE, dependson="ci"}
+
+# CHECK SUM OF FIRST-ORDER INDICES --------------------------------------------
+
+ci[sensitivity == "Si"] %>%
+  .[, sum(original), Continent]
+```
+
+# Session information
+
+```{r session_information}
+
+# SESSION INFORMATION ---------------------------------------------------------
+
+sessionInfo()
+
+```
+# References
