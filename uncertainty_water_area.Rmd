@@ -85,7 +85,7 @@ theme_AP <- function() {
 }
 ```
 
-Since we will need to read in several global datasets and clean the data before conducting any test, we define here several functions to that aim. Firstly, the function `country_code` will ensure that all countries receive the same name across datasets. Secondly, the `coords2country` function will translate coordinatesinto the country name. Finally, the `get_nc` function will allow to read in `.nc` files, a format widely used to store spatially explicit data on irrigation water withdrawal.
+Since we will need to read in several global datasets and clean the data before conducting any test, we define here several functions to that aim. Firstly, the function `country_code` will ensure that all countries receive the same name across datasets. Secondly, the `coords2country` function will translate coordinates into the country name. Finally, the `get_nc` function will allow to read in `.nc` files, a format widely used to store spatially explicit data on irrigation water withdrawal.
 
 ```{r functions_data, cache=TRUE}
 
@@ -244,7 +244,7 @@ water.dt <- rbind(liu.dt.full, table4.dt.full, GHM.dt.full)
 
 ## Irrigated area datasets
 
-There are also several datasets informing on the extension of irrigation at the country level, with large uncertainties (sometimes the values differ for more than one order of magnitude). Here we use the data compiled by @Meier2018, which also includes the datasets by Aquastat [@FAO2016b], FAOSTAT [@FAO2017a],  @Siebert2013, @Salmon2015 and @Thenkabail2009.
+There are also several datasets informing on the extension of irrigation at the country level, with large uncertainties (sometimes the values differ by more than one order of magnitude). Here we use the data compiled by @Meier2018, which also includes the datasets by Aquastat [@FAO2016b], FAOSTAT [@FAO2017a],  @Siebert2013, @Salmon2015 and @Thenkabail2009.
 
 ```{r area_dataset, cache=TRUE}
 
@@ -423,7 +423,7 @@ full.imput <- imput[, lapply(.SD, unlist),
 
 # Bootstrap regressions
 
-In this section we bootstrap ($R=500$) the regression models in each combination of irrigated area dataset (trigger X1), irrigation water withdrawal dataset (trigger X2), linear regression method (robust/non-robust/heteroskedasticity-corrected; trigger X3), imputation method (trigger X4) and iteration selected (trigger X5). Bootstrap allows to account for an extra source of uncertainty: the true value of $\beta$ (trigger X6). 
+In this section we bootstrap ($R=500$) the regression models in each combination of irrigated area dataset (trigger X1), irrigation water withdrawal dataset (trigger X2), linear regression method (robust/non-robust/heteroskedasticity-corrected; trigger X3), imputation method (trigger X4) and iteration selected (trigger X5). The bootstrap allows to account for an extra source of uncertainty: the true value of $\beta$ (trigger X6). 
 
 ```{r set_boot, cache=TRUE, dependson="merge_with_area"}
 
@@ -589,7 +589,7 @@ fwrite(lookup, "lookup.csv")
 
 # The sample matrix
 
-This section designs the sample matrix that will be used to compute the model output, i.e. the $\beta$ value defined by the conditions set by the triggers. Firstly, we pool all irrigated area and water withdrawal datasets and calculate the minimum and maximum values for each of these parameters. This is needed to bound the uniform distributions with which we will characterize $X_1$ (i.e. the trigger to select which irrigated area data set to use) and $X_2$ (i.e. the trigger to select which irrigation water withdrawal data set to use). We also define the initial sample size of the sample matrix ($N = 213$), for which we use Sobol’ Quasi Random Numbers, and create a function to transform its columns to their appropriate distributions.
+This section designs the sample matrix that will be used to compute the model output, i.e. the $\beta$ value defined by the conditions set by the triggers. Firstly, we pool all irrigated area and water withdrawal datasets and calculate the minimum and maximum values for each of these parameters. This is needed to bound the uniform distributions with which we will characterize $X_1$ (i.e. the trigger to select which irrigated area data set to use) and $X_2$ (i.e. the trigger to select which irrigation water withdrawal data set to use). We also define the initial sample size of the sample matrix ($N = 2^{13}$), for which we use Sobol’ Quasi Random Numbers, and create a function to transform its columns to their appropriate distributions.
 
 ```{r distributions, cache=TRUE, dependson=c("area_dataset", "water_with_dataset")}
 
@@ -852,22 +852,13 @@ for(i in names(tmp)) {
 ci.dummy <- rbindlist(ci.dummy, idcol = "Continent")
 ```
 
-```{r plot_sobol, cache=TRUE, dependson="ci", dev="tikz"}
+```{r plot_sobol, cache=TRUE, dependson="ci", dev="tikz", fig.cap="Sobol' indices."}
 
 # PLOT SOBOL' INDICES ---------------------------------------------------------
 
 plot_sobol(ci, type = 1, dummy = ci.dummy) + 
          facet_wrap(~Continent, ncol = 4) + 
          theme(aspect.ratio = 1)
-```
-
-```{r plot_sobol_second_third, cache=TRUE, dependson="ci", dev = "tikz"}
-
-# PLOT SOBOL' INDICES (SECOND AND THIRD ORDER) --------------------------------
-
-lapply(2:3, function(x) plot_sobol(ci, type = x, dummy = ci.dummy) + 
-         facet_wrap(~Continent, ncol = 2) +
-         theme(axis.text.x = element_text(size = 7)))
 ```
 
 ```{r sum_si, cache=TRUE, dependson="ci"}
@@ -877,6 +868,17 @@ lapply(2:3, function(x) plot_sobol(ci, type = x, dummy = ci.dummy) +
 ci[sensitivity == "Si"] %>%
   .[, sum(original), Continent]
 ```
+
+```{r plot_sobol_second_third, cache=TRUE, dependson="ci", dev = "tikz", fig.cap="High-order interactions between the triggers."}
+
+# PLOT SOBOL' INDICES (SECOND AND THIRD ORDER) --------------------------------
+
+lapply(2:3, function(x) plot_sobol(ci, type = x, dummy = ci.dummy) + 
+         facet_wrap(~Continent, ncol = 2) +
+         theme(axis.text.x = element_text(size = 7)))
+```
+
+\clearpage
 
 # Session information
 
