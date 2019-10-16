@@ -837,9 +837,18 @@ ci.dummy <- rbindlist(ci.dummy, idcol = "Continent")
 
 # PLOT SOBOL' INDICES ---------------------------------------------------------
 
-lapply(1:3, function(x) plot_sobol(ci, type = x, dummy = ci.dummy) + 
+plot_sobol(ci, type = 1, dummy = ci.dummy) + 
          facet_wrap(~Continent, ncol = 4) + 
-         theme(aspect.ratio = 1))
+         theme(aspect.ratio = 1)
+```
+
+```{r plot_sobol_second_third, cache=TRUE, dependson="ci", dev = "tikz"}
+
+# PLOT SOBOL' INDICES (SECOND AND THIRD ORDER) --------------------------------
+
+lapply(2:3, function(x) plot_sobol(ci, type = x, dummy = ci.dummy) + 
+         facet_wrap(~Continent, ncol = 2) +
+         theme(axis.text.x = element_text(size = 7)))
 ```
 
 ```{r sum_si, cache=TRUE, dependson="ci"}
