@@ -589,7 +589,7 @@ fwrite(lookup, "lookup.csv")
 
 # The sample matrix
 
-This section designs the sample matrix that will be used to select the $\beta$ value according to the conditions set by the triggers. Firstly, we pool all irrigated area and water withdrawal datasets and calculate the minimum and maximum values for each of these parameters. This is needed to bound the uniform distributions with which we will characterize $X_1$ and $X_2$ respectively. We also define the size of the sample matrix ($N=2^{14}$), and create a function to transform its columns to their appropriate distributions. 
+This section designs the sample matrix that will be used to compute the model output, i.e. the $\beta$ value defined by the conditions set by the triggers. Firstly, we pool all irrigated area and water withdrawal datasets and calculate the minimum and maximum values for each of these parameters. This is needed to bound the uniform distributions with which we will characterize $X_1$ (i.e. the trigger to select which irrigated area data set to use) and $X_2$ (i.e. the trigger to select which irrigation water withdrawal data set to use). We also define the initial sample size of the sample matrix ($N = 213$), for which we use Sobol’ Quasi Random Numbers, and create a function to transform its columns to their appropriate distributions.
 
 ```{r distributions, cache=TRUE, dependson=c("area_dataset", "water_with_dataset")}
 
@@ -687,9 +687,26 @@ sample.matrix.dt <- rbindlist(sample.matrix, idcol = "Continent")
 fwrite(sample.matrix.dt, "sample.matrix.dt.csv")
 ```
 
+We also print the sample matrix to better inform the reader about our analysis:
+\begin{itemize}
+\item X1: Trigger that decides which irrigated area data set to use.
+\item X2: Trigger that decides which irrigation water withdrawal data set to use.
+\item X3: Trigger that decides whether to select robust, non-robust or heteroskedasticity-corrected methods.
+\item X4: Trigger that decides which imputation method should be used for missing values.
+\item X5: Trigger that decides which iteration of a given imputation method to use.
+\item X6: Trigger that decides which $\beta$ value to extract from the pool of bootstrap replicas, with 1 and 500 being respectively the $\beta$ value with the hlowest and highest values.
+\end{itemize}
+
+```{r print_matrix)}
+
+# PRINT SAMPLE MATRIX ---------------------------------------------------------
+
+print(sample.matrix.dt)
+```
+
 # The model
 
-The model is simply a one-line function that searches in the lookup table the $\beta$ value defined by the triggers of the sample matrix. In order to speed up the computation, we use parallel computing. 
+The model is simply a one-line function that runs in the sample matrix as follows: at the $v$-th row, it creates a vector with all the conditions set by $X_1^{(v)}, ..., X_6^{(v)}$, and uses this vector to extract from the lookup table the $\beta^{(v)}$ value according to these conditions.
 
 ```{r define_model, cache=TRUE}
 
@@ -759,6 +776,8 @@ AB.dt[, .(sublinear = sum(Y < 1, na.rm = TRUE) / .N,
 ```
 
 # Sensitivity analysis
+
+Here we conduct the sensitivity analysis to appraise how much uncertainty in $\beta$ is conveyed by each of the triggers. We use the @Saltelli2010a and the @Jansen1999 estimators to compute first-order effects ($S_i$) and total-order effects ($S_{Ti}$) respectively, as per the established best practices.Figure 8 plots the results. It seems that the trigger conveying the most uncertainty in the value of $\beta$ is X1, which reflects the uncertainty in the current extension of irrigation, followed by X6, which represents the uncertainty in the true value of $\beta$. X3 (i.e. the trigger that decides whether to correct the regressions for outliers/heteroskedasticity) does not have any effect. It is worth mentioning the presence of significant interactions between the triggers: below we show that they are responsible for 10–25\% of the uncertainty in $\beta$. Figures 9 and 10 indicate the presence of relevant second and third-order interactions in the case of the Americas and Europe.
 
 ```{r sensitivity_settings, cache=TRUE}
 
