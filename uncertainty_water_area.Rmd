@@ -60,7 +60,8 @@ loadPackages(c("data.table", "ggplot2", "sensobol", "scales",
                "ncdf4", "rworldmap", "sp", "countrycode", 
                "dplyr", "IDPmisc", "boot", "parallel", 
                "MASS", "doParallel", "complmrob", 
-               "mvoutlier", "sandwich", "lmtest", "mice"))
+               "mvoutlier", "sandwich", "lmtest", "mice", 
+               "ggridges", "broom", "naniar", "cowplot"))
 
 # SET CHECKPOINT --------------------------------------------------------------
 
@@ -272,6 +273,13 @@ full.dt <- merge(irrigated.dt, water.dt, on = c("Continent", "Country", "Code"),
   .[!Continent == "Oceania"] # Drop Oceania
 ```
 
+```{r export.irrigated.dt, cache=TRUE, dependson="merge_with_area"}
+
+# EXPORT IRRIGATED AREA DT ----------------------------------------------------
+
+fwrite(irrigated.dt, "irrigated.dt.csv")
+```
+
 ```{r plot_merged, cache=TRUE, dependson="merge_with_area", dev="tikz", fig.height=8, fig.width=7, fig.cap="Scatter plots of irrigated areas (x-axis) against irrigation water withdrawal (y-axis). All the possible combinations of datasets are shown."}
 
 # PLOT ------------------------------------------------------------------------
@@ -288,7 +296,8 @@ full.dt %>%
        y = expression(paste("Water withdrawal", "", 10^9, m^3/year))) +
   facet_grid(Water.Dataset ~ Area.Dataset) +
   theme_AP() +
-  theme(legend.position = "top")
+  theme(legend.position = "top", 
+        strip.text = element_text(size = 7))
 ```
 
 ```{r log10, cache=TRUE, dependson="merge_with_area"}
@@ -301,6 +310,64 @@ col_names <- c("Continent", "Water.Dataset", "Area.Dataset", "Regression",
 cols_group <- c("Continent", "Area.Dataset", "Water.Dataset")
 full.dt <- full.dt[, (cols):= lapply(.SD, log10), .SDcols = (cols)]
 ```
+
+```{r export_dataset_log10, cache=TRUE, dependson="log10"}
+
+# EXPORT FULL DATASET WITH MISSING VALUES --------------------------------------------
+
+fwrite(full.dt, "full.dt.csv")
+```
+
+```{r plot_missing, cache=TRUE, dependson="log10", dev="tikz", fig.height=8, fig.width=7}
+
+# SCATTERPLOT SHOWING MISSING VALUES ------------------------------------------
+
+scatter.na <- copy(full.dt)
+cols_transform <- c("Irrigated.Area", "Water.Withdrawn")
+scatter.na[, (cols_transform):= lapply(.SD, function(x) 10 ^ x), .SDcols = cols_transform]
+tmp <- split(scatter.na, scatter.na$Continent)
+
+gg <- list()
+for(i in names(tmp)) {
+  gg[[i]] <- ggplot(tmp[[i]], aes(Irrigated.Area, Water.Withdrawn)) +
+    geom_miss_point() +
+    facet_grid(Water.Dataset ~ Area.Dataset) + 
+    scale_x_log10(breaks = trans_breaks("log10", function(x) 10 ^ (2 * x)),
+                labels = trans_format("log10", math_format(10 ^ .x))) +
+    scale_y_log10(breaks = trans_breaks("log10", function(x) 10 ^ (2 * x)),
+                  labels = trans_format("log10", math_format(10 ^ .x))) +
+    labs(x = "Irrigated area (Mha)", 
+         y = expression(paste("Water withdrawal", "", 10^9, m^3/year))) +
+    theme_AP() +
+    theme(legend.position = "top",
+          strip.text = element_text(size = 7)) +
+    ggtitle(names(tmp[i]))
+}
+gg
+```
+
+```{r plot_missing2, cache=TRUE, dependson="log10", fig.height=8, fig.width=4}
+
+# PLOT PERCENTAGE OF MISSING --------------------------------------------------
+
+na.dt <- full.dt[, .(Continent, Country, Irrigated.Area, Water.Withdrawn)]
+tmp <- split(na.dt[, !"Continent", with = FALSE], na.dt$Continent)
+
+gg <- list()
+for(i in names(tmp)) {
+  gg[[i]] <- gg_miss_fct(x = tmp[[i]], fct = Country) +
+    coord_flip() +
+    labs(x = "Parameter", 
+         y = "") +
+    viridis::scale_fill_viridis(name = "Missing") +
+    theme(legend.position = "top") +
+    ggtitle(names(tmp[i]))
+}
+
+gg
+```
+
+
 
 ## Assesment of uncertainties in the model structure
 
@@ -334,7 +401,8 @@ ggplot(tmp, aes(md.cla, md.rob,
   labs(x = "Mahalanobis distance", 
        y = "Robust distance") +
   theme_AP() +
-  theme(legend.position = "top")
+  theme(legend.position = "top", 
+        strip.text = element_text(size = 7))
 ```
 
 ### Heteroskedasticity
@@ -387,7 +455,7 @@ for (j in 1:ncol(full.dt)) set(full.dt, which(is.infinite(full.dt[[j]])), j, NA)
 full.dt[, lapply(.SD, function(x) sum(is.infinite(x)))] # Check
 
 # Imputation settings
-m.iterations <- 5
+m.iterations <- 20
 imputation.methods <- c("rf", "norm.boot", "norm.nob")
 set.seed(10) # Set seed to allow for replication
 
@@ -421,165 +489,111 @@ full.imput <- imput[, lapply(.SD, unlist),
                     .(Continent, Area.Dataset, Water.Dataset, Imputation.Method)]
 ```
 
-# Bootstrap regressions
+# Linear regressions and residuals
 
-In this section we bootstrap ($R=500$) the regression models in each combination of irrigated area dataset (trigger X1), irrigation water withdrawal dataset (trigger X2), linear regression method (robust/non-robust/heteroskedasticity-corrected; trigger X3), imputation method (trigger X4) and iteration selected (trigger X5). The bootstrap allows to account for an extra source of uncertainty: the true value of $\beta$ (trigger X6). 
+```{r conduct_lm, cache=TRUE, dependson="missing_values"}
 
-```{r set_boot, cache=TRUE, dependson="merge_with_area"}
+# LINEAR REGRESSIONS AND PULL RESIDUALS ---------------------------------------
 
-# PREPARE THE BOOTSTRAP -------------------------------------------------------
-
-# Define number of replicas
-R <- 500
-
-# Set number of cores (75 %)
-n_cores <- floor(detectCores() * 0.75)
-
-# Set grouping vector
+# Set grouping vectors
+cols_group <- c("Continent", "Area.Dataset", "Water.Dataset")
 all.cols <- c(cols_group, "Imputation.Method", "Iteration")
+
+dt <- full.imput[, .(fit = list(list(lm(Water.Withdrawn ~ Irrigated.Area)))), all.cols] %>%
+  .[, lapply(fit, function(x) lapply(x, function(y) augment(y))), all.cols]
+
+resid.dt <- dt[, lapply(V1, function(x) unlist(x$.resid)), all.cols] %>%
+  .[, Country:= full.imput$Country] %>%
+  .[, Method:= "Normal"]
+
+dtR <- full.imput[, .(fit = list(list(rlm(Water.Withdrawn ~ Irrigated.Area, 
+                                          maxit = 60)))), all.cols] %>%
+  .[, lapply(fit, function(x) lapply(x, function(y) augment(y))), all.cols]
+
+
+resid.dtR <- dtR[, lapply(V1, function(x) unlist(x$.resid)), all.cols] %>%
+  .[, Country:= full.imput$Country] %>%
+  .[, Method:= "Robust"]
+
+final.resid <- rbind(resid.dt, resid.dtR)
 ```
 
-## Regular bootstrap
+```{r plot_residuals, cache=TRUE, dependson="conduct_lm", fig.height=8, fig.width=6, warning=FALSE}
 
-We set the formula to bootstrap the classic OLS regression, and launch the computation. We finally extract the results.
-
-```{r regular_boot, cache=TRUE, dependson = c("set_boot", "missing_values")}
-
-# REGULAR BOOTSTRAP -----------------------------------------------------------
-
-# Function to bootstrap OLS coefficients
-boot.ols <- function(formula, x, i) {
-  d <- x[i, ]
-  out <- coef(lm(formula, data = d))
-  return(out)
+ # PLOT RESIDUALS -------------------------------------------------------------
+# function to plot
+gg_bar <- gg_ridge <- list()
+for(i in c("Africa", "Americas", "Asia", "Europe")) {
+  country.vector <- final.resid[Continent == i] %>%
+    .[order(V1)] %>%
+    .$Country %>%
+    unique(.)
+  gg_ridge[[i]] <- final.resid[Continent == i] %>%
+    .[, Country:= factor(Country, levels = country.vector)] %>%
+    ggplot(., aes(V1, Country, fill = ..x..)) +
+    geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+    geom_vline(xintercept = 0, 
+               lty = 2) +
+    scale_fill_gradient2(name = "Residual", 
+                         low = "blue", mid = "white",
+                         high = "red", midpoint = 0) +
+    labs(x = "Residual", 
+         y = "") +
+    theme_AP() + 
+    theme(legend.position = "top")
+  gg_bar[[i]] <- final.resid[Continent == i] %>%
+    .[, sum(V1 > 0) / .N, Country] %>%
+    ggplot(., aes(reorder(Country, V1), V1, 
+                  fill = ..y..)) + 
+    geom_bar(stat = "identity") +
+    coord_flip() + 
+    labs(y = "Residuals > 0 (%)", 
+         x = "") +
+    theme_AP() + 
+    theme(legend.position = "top")
 }
 
-# Bootstrap
-ols <- full.imput[, list(list(boot(.SD, 
-                                   statistic = boot.ols, 
-                                   R = R,
-                                   formula = Water.Withdrawn ~ Irrigated.Area,
-                                   parallel = "multicore",
-                                   ncpus = n_cores))), 
-                  all.cols]
+gg_ridge
 ```
 
-```{r extract_results_regular, cache=TRUE, dependson=c("missing_values", "regular_boot")}
+```{r export_dataset_imputation, cache=TRUE, dependson="missing_values"}
 
-# EXTRACT RESULTS -------------------------------------------------------------
+# EXPORT FULL DATASET WITHOUT MISSING VALUES --------------------------------------------
 
-ols.dt <- ols[, `:=`("All", list(lapply(V1, function(x) x["t"])))] %>%
-  .[, list(Alpha = lapply(All, function(x) lapply(x, function(y) y[, 1])), 
-           Beta = lapply(All, function(x) lapply(x, function(y) y[, 2]))), 
-    all.cols] %>%
-  .[, lapply(.SD, unlist), .SDcols = c("Alpha", "Beta"), 
-    all.cols] %>%
-  .[, Regression:= "Normal"]
-
-ols.dt <- ols.dt[, Alpha:= NULL]
+fwrite(full.imput, "full.imput.csv")
 ```
 
-## Robust bootstrap
+# Compute all possible beta values
 
-We set the formula to bootstrap robust OLS regression (M estimator), and launch the computation. We then extract the results.
+```{r compute_beta, cache=TRUE, dependson="missing_values"}
 
-```{r robust_boot, cache=TRUE, dependson=c("set_boot", "missing_values")}
+# COMPUTE BETA AND R^2 --------------------------------------------------------
 
-# ROBUST BOOTSTRAP ------------------------------------------------------------
-
-# Function to bootstrap robust coefficients
-boot.olsR <- function(formula, x, i) {
-  d <- x[i, ]
-  out <- coef(rlm(formula, data = d))
-  return(out)
-}
-
-# Bootstrap
-olsR <- full.imput[, list(list(boot(.SD, 
-                                   statistic = boot.olsR, 
-                                   R = R,
-                                   formula = Water.Withdrawn ~ Irrigated.Area,
-                                   parallel = "multicore",
-                                   ncpus = n_cores))), 
-                  all.cols]
+results <- full.imput[, .(Normal = coef(lm(Water.Withdrawn ~ Irrigated.Area))[[2]], 
+                          Robust = coef(rlm(Water.Withdrawn ~ Irrigated.Area, maxit = 60))[[2]], 
+                          r.squared = summary(lm(Water.Withdrawn ~ Irrigated.Area))$r.squared), 
+                      all.cols]
 ```
 
-```{r extract_results_robust, cache=TRUE, dependson="robust_boot"}
+```{r export_beta_results, cache=TRUE, dependson="compute_beta"}
 
-# EXTRACT RESULTS -------------------------------------------------------------
+# EXPORT BETA AND R^2 RESULTS -------------------------------------------------
 
-olsR.dt <- olsR[, `:=`("All", list(lapply(V1, function(x) x["t"])))] %>%
-  .[, list(Alpha = lapply(All, function(x) lapply(x, function(y) y[, 1])), 
-           Beta = lapply(All, function(x) lapply(x, function(y) y[, 2]))), 
-    all.cols] %>%
-  .[, lapply(.SD, unlist), .SDcols = c("Alpha", "Beta"), 
-    all.cols] %>%
-  .[, Regression:= "Robust"]
-
-olsR.dt <- olsR.dt[, Alpha:= NULL]
-```
-
-## Heteroskedastic Bootstrap
-
-We finally perform an heteroskedasticity-corrected bootstrap as follows: for each linear regression, we calculate the covariance matrix of the coefficients using an heteroskedasticity-consistent estimator (White's estimator). We then extract the upper and lower 95\% confidence intervals, and use them to compute the mean and the standard deviation (assuming an underlying normal distribution). Finally, we use these values to randomly generate normal distributions with size $R$ for each combination of triggers.
-
-```{r hetero_boot, cache=TRUE, dependson= c("log10", "missing_values", "set_boot")}
-
-# HETEROSKEDASTIC BOOTSTRAP ---------------------------------------------------
-
-hetero2 <- full.imput[, .(model = .(lm(Water.Withdrawn ~ Irrigated.Area))), 
-                             all.cols]
-
-hetero.dist <- hetero2[, .(cis = .(lapply(model, function(x) 
-  coefci(x, level = 0.95, vcov. = vcovHC(x, type = "HC1"))))), all.cols]
-
-hetero.dist <- hetero.dist[, ci.min:= lapply(cis, function(x) 
-  lapply(x, function(y) y[2])), all.cols]
-
-hetero.dist <- hetero.dist[, ci.max:= lapply(cis, function(x) 
-  lapply(x, function(y) y[4])), all.cols]
-
-hetero.dist <- hetero.dist[, c("ci.min", "ci.max"):= lapply(.SD, as.numeric), 
-                           .SDcols = c("ci.min", "ci.max")]
-
-hetero.dist <- hetero.dist[, `:=` (mean = (ci.min + ci.max) / 2, 
-                                   sd = (ci.max - ci.min) / 4)]
-
-# Set seed
-set.seed(10)
-
-# Sample
-ols.dt.het <- hetero.dist[, .(Beta = rnorm(n = R, mean = mean, sd = sd)), all.cols] %>%
-  .[, Regression:= "Hetero"]
-```
-
-## Merge results
-
-We bind the results of each bootstrapped regression, and obtained a full dataset with all the replicas.
-
-```{r merge_boot, cache=TRUE, dependson=c("extract_results_robust", "extract_results_regular", "hetero_boot")}
-
-# MERGE REGULAR, ROBUST AND HETEROSKEDASTIC BOOTSTRAP -------------------------
-
-replicas <- rbind(ols.dt, olsR.dt, ols.dt.het)
+fwrite(results, "results.csv")
 ```
 
 ## Create lookup table
 
 Here we define the lookup table that we will use to select the $\beta$ value according to the conditions set by the triggers in the sample matrix (see below). 
 
-```{r lookup, cache=TRUE, dependson="merge_boot"}
+```{r lookup, cache=TRUE, dependson="compute_beta"}
 
 # CREATE LOOKUP TABLE ---------------------------------------------------------
 
-col_names <- c("Continent", "Water.Dataset", "Area.Dataset", 
-               "Regression", "Imputation.Method", "Iteration")
-
-lookup <- replicas[order(Beta), .SD, col_names] %>%
-  .[, ID:= 1:.N, col_names] %>%
-  .[, index:= paste(Continent, Area.Dataset, Water.Dataset,
-                       Regression, Imputation.Method, Iteration, 
-                       ID, sep = "_")] 
+lookup <- melt(results, measure.vars = c("Normal", "Robust"), 
+     variable.name = "Regression", value.name = "Beta") %>%
+  .[, index:= paste(Continent, Area.Dataset, Water.Dataset, Regression, 
+                    Imputation.Method, Iteration, sep = "_")]
 
 lookup <- setkey(lookup, index)
 
@@ -591,25 +605,6 @@ fwrite(lookup, "lookup.csv")
 
 This section designs the sample matrix that will be used to compute the model output, i.e. the $\beta$ value defined by the conditions set by the triggers. Firstly, we pool all irrigated area and water withdrawal datasets and calculate the minimum and maximum values for each of these parameters. This is needed to bound the uniform distributions with which we will characterize $X_1$ (i.e. the trigger to select which irrigated area data set to use) and $X_2$ (i.e. the trigger to select which irrigation water withdrawal data set to use). We also define the initial sample size of the sample matrix ($N = 2^{13}$), for which we use Sobol’ Quasi Random Numbers, and create a function to transform its columns to their appropriate distributions.
 
-```{r distributions, cache=TRUE, dependson=c("area_dataset", "water_with_dataset")}
-
-# DEFINE DISTRIBUTIONS --------------------------------------------------------
-
-# Vector with the name of the irrigated area datasets
-irrigated.datasets <- colnames(meier.dt)[4:9]
-
-# Irrigated Area
-irrigated.area <- melt(meier.dt, measure.vars = irrigated.datasets) %>%
-  .[, value:= value / 10 ^ 6] %>%
-  .[, .(Total = sum(value, na.rm = TRUE)), .(Continent, variable)] %>%
-  .[, .(min = min(Total), max = max(Total)), Continent]
-
-# Irrigation water withdrawn
-water.withdrawn <- water.dt[, .(Total = sum(Water.Withdrawn, na.rm = TRUE)), 
-                            .(Continent, Water.Dataset)] %>%
-  .[, .(min = min(Total), max = max(Total)), Continent]
-```
-
 ```{r set_sample_matrix, cache=TRUE}
 
 # DEFINE THE SETTINGS OF THE SAMPLE MATRIX ------------------------------------
@@ -617,19 +612,13 @@ water.withdrawn <- water.dt[, .(Total = sum(Water.Withdrawn, na.rm = TRUE)),
 Continents <- c("Africa", "Americas", "Asia", "Europe")
 
 # Create a vector with the name of the columns
-parameters <- paste("X", 1:6, sep = "")
+parameters <- paste("X", 1:5, sep = "")
 
 # Obtain number of parameters
 k <- length(parameters)
 
 # Select sample size
 n <- 2 ^ 14
-
-# Check number of bootstrap samples
-N.boot <- lookup[, .(N = .N), .(Continent, Area.Dataset, Water.Dataset,
-                                Regression, Imputation.Method, Iteration)] %>%
-  .[, N] %>%
-  .[1]
 ```
 
 ```{r sample_matrix, cache=TRUE, dependson="set_sample_matrix"}
@@ -671,14 +660,12 @@ transform_sample_matrix <- function(dt) {
                                   ifelse(X2 == 4, "WaterGap", 
                                          ifelse(X2 == 5, "Table 4", 
                                                 "Liu et al. 2016")))))] %>%
-    .[, X3:= floor(X3 * (3 - 1 + 1)) + 1] %>%
-    .[, X3:= ifelse(X3==1, "Normal", 
-                    ifelse(X3 == 2, "Robust", "Hetero"))] %>%
+    .[, X3:= floor(X3 * (2 - 1 + 1)) + 1] %>%
+    .[, X3:= ifelse(X3==1, "Normal", "Robust")] %>%
     .[, X4:= floor(X4 * (length(imputation.methods) - 1 + 1)) + 1] %>%
     .[, X4:= ifelse(X4 == 1, imputation.methods[1], 
                     ifelse(X4 == 2, imputation.methods[2], imputation.methods[3]))] %>%
-    .[, X5:= floor(X5 * (m.iterations - 1 + 1)) + 1] %>%
-    .[, X6:= floor(X6 * (N.boot - 1)) + 1]
+    .[, X5:= floor(X5 * (m.iterations - 1 + 1)) + 1] 
 }
 
 sample.matrix <- lapply(sample.matrix, transform_sample_matrix)
@@ -712,12 +699,15 @@ The model is simply a one-line function that runs in the sample matrix as follow
 
 # THE MODEL -------------------------------------------------------------------
 
-model <- function(X) lookup[.(paste0(X[, 1:7], collapse = "_"))][, Beta]
+model <- function(X) lookup[.(paste0(X[, 1:6], collapse = "_"))][, c(Beta, r.squared)]
 ```
 
 ```{r run_model, cache=TRUE, dependson=c("define_model", "set_boot", "lookup", "transform_sample_matrix")}
 
 # RUN THE MODEL---------------------------------------------------------------
+
+# Set number of cores at 75%
+n_cores <- floor(detectCores() * 0.75)
 
 # Create cluster
 cl <- makeCluster(n_cores)
@@ -738,7 +728,8 @@ stopCluster(cl)
 
 # ARRANGE MODEL OUTPUT -------------------------------------------------------
 
-sample.matrix.dt <- sample.matrix.dt[, Y:= as.numeric(cbind(Y))]
+sample.matrix.dt <- cbind(sample.matrix.dt, data.table(do.call(rbind, Y))) %>%
+  setnames(., c("V1", "V2"), c("Y", "r.squared"))
 
 # Select the A and B matrix only (for uncertainty analysis)
 AB.dt <- sample.matrix.dt[, .SD[1:(n * 2)], Continent]
@@ -752,18 +743,35 @@ fwrite(AB.dt, "AB.dt.csv")
 
 Here we plot the distribution of $\beta$ for each continent, and calculate the proportion of model runs with $\beta<1$ (sublinear regime; larger irrigated areas are more water efficient) and $\beta>1$ (superlinear regime, larger irrigated areas are less water efficient). The results suggest that there are almost 9/10 chances and 3/4 chances of larger irrigated areas in Asia and Europe being more water efficient than smaller ones. In the case of the Americas and Africa, the chances are 3.5/5 and 1/2 respectively.
 
-```{r plot_uncertainty, cache=TRUE, dependson="arrange_output", dev="tikz", fig.height=4, fig.width=5, fig.cap="Uncertainty in the model output."}
+```{r plot_uncertainty, cache=TRUE, dependson="arrange_output", dev="tikz", fig.height=4, fig.width=7.5, fig.cap="Uncertainty in the model output. a) Uncertainty in the model goodness of fit. All sources of uncertainty have been taken into account except the selection between OLS and OLS robust (trigger X2). Robust OLS does not allow to compute $r^2$. b) Uncertainty in the slope."}
 
 # PLOT UNCERTAINTY ------------------------------------------------------------
 
-ggplot(AB.dt, aes(Y, fill = Continent)) + 
+# Plot r2
+a <- ggplot(AB.dt, aes(r.squared, fill = Continent)) + 
+  geom_density(alpha = 0.3) + 
+  theme_AP() +
+  labs(x = expression(R ^ 2), 
+       y = "Density") +
+  theme(legend.position = "none")
+
+# Plot beta
+b <- ggplot(AB.dt, aes(Y, fill = Continent)) + 
   geom_density(alpha = 0.3) + 
   theme_AP() +
   geom_vline(xintercept = 1, 
              lty = 2) +
   labs(x = "$\\beta$", 
-       y = "Density") +
-  theme(legend.position = "top")
+       y = "") +
+  theme(legend.position = "none")
+
+# Extract legend
+legend <- cowplot::get_legend(a + theme(legend.position = "top"))
+
+# Merge
+all <- plot_grid(a, b, ncol = 2, align = "hv", labels = "auto")
+
+plot_grid(legend, all, ncol = 1, rel_heights = c(0.2, 1))
 ```
 
 ```{r super_sub, cache=TRUE, dependson="arrange_output"}
@@ -778,6 +786,25 @@ AB.dt[, .(sublinear = sum(Y < 1, na.rm = TRUE) / .N,
 # Sensitivity analysis
 
 Here we conduct the sensitivity analysis to appraise how much uncertainty in $\beta$ is conveyed by each of the triggers. We use the @Saltelli2010a and the @Jansen1999 estimators to compute first-order effects ($S_i$) and total-order effects ($S_{Ti}$) respectively, as per the established best practices.Figure 8 plots the results. It seems that the trigger conveying the most uncertainty in the value of $\beta$ is X1, which reflects the uncertainty in the current extension of irrigation, followed by X6, which represents the uncertainty in the true value of $\beta$. X3 (i.e. the trigger that decides whether to correct the regressions for outliers/heteroskedasticity) does not have any effect. It is worth mentioning the presence of significant interactions between the triggers: below we show that they are responsible for 10–25\% of the uncertainty in $\beta$. Figures 9 and 10 indicate the presence of relevant second and third-order interactions in the case of the Americas and Europe.
+
+```{r scatterplots, cache=TRUE, dependson="arrange_output", fig.height=5, fig.width=7}
+
+# PLOT SCATTERPLOTS OF PARAMETERS VS MODEL OUTPUT -----------------------------
+
+scatter.dt <- melt(AB.dt, measure.vars = paste("X", 1:5, sep = "")) %>%
+  .[, Regime:= ifelse(Y > 1, "Super-linear", "Sub-linear")]
+
+ggplot(scatter.dt, aes(value, Y, color = Regime)) +
+  geom_point(alpha = 0.3, size = 0.5) +
+  facet_grid(Continent ~ variable, 
+             scales = "free_x") +
+  geom_hline(yintercept = 1, 
+             lty = 2) +
+  scale_color_manual(values = c("#00BFC4", "#F8766D")) +
+  theme_AP() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        legend.position = "top")
+```
 
 ```{r sensitivity_settings, cache=TRUE}
 
@@ -800,7 +827,7 @@ conf <- 0.95
 
 # SENSITIVITY ANALYSIS --------------------------------------------------------
 
-# Compute Sobol' indices up to the third order
+# Beta
 indices <- sample.matrix.dt[, sobol_indices(Y, 
                                             params = parameters, 
                                             R = R, 
@@ -812,7 +839,19 @@ indices <- sample.matrix.dt[, sobol_indices(Y,
                                             third = TRUE), 
                             Continent]
 
-# Compute Sobol' indices for the dummy parameter
+# r squared
+indicesR <- sample.matrix.dt[, sobol_indices(r.squared, 
+                                             params = parameters, 
+                                             R = R, 
+                                             n = n, 
+                                             type = estimator,
+                                             parallel = "multicore", 
+                                             ncpus = n_cores, 
+                                             second = TRUE, 
+                                             third = TRUE), 
+                            Continent]
+
+# Compute Sobol' indices for the dummy parameter (Beta)
 indices.dummy <- sample.matrix.dt[, sobol_dummy(Y, 
                                                 params = parameters, 
                                                 R = R, 
@@ -820,13 +859,22 @@ indices.dummy <- sample.matrix.dt[, sobol_dummy(Y,
                                                 parallel = "multicore", 
                                                 ncpus = n_cores), 
                                   Continent]
+
+# Compute Sobol' indices for the dummy parameter (r squared)
+indices.dummyR <- sample.matrix.dt[, sobol_dummy(r.squared, 
+                                                 params = parameters, 
+                                                 R = R, 
+                                                 n = n, 
+                                                 parallel = "multicore", 
+                                                 ncpus = n_cores), 
+                                  Continent]
 ```
 
 ```{r ci, cache=TRUE, dependson="sensitivity"}
 
 # COMPUTE CONFIDENCE INTERVALS -----------------------------------------------
 
-# Compute ci for the model parameters
+# Beta
 tmp <- split(indices, indices$Continent)
 ci <- list()
 for(i in names(tmp)) {
@@ -840,7 +888,21 @@ for(i in names(tmp)) {
 
 ci <- rbindlist(ci, idcol = "Continent") 
 
-# Compute ci for the dummy parameter
+# r squared
+tmp <- split(indicesR, indicesR$Continent)
+ciR <- list()
+for(i in names(tmp)) {
+  ciR[[i]] <- sobol_ci(tmp[[i]], 
+                      params = parameters,
+                      type = type, 
+                      conf = conf, 
+                      second = TRUE, 
+                      third = TRUE)
+}
+
+ciR <- rbindlist(ciR, idcol = "Continent") 
+
+# Compute ci for the dummy parameter (Beta)
 tmp <- split(indices.dummy, indices.dummy$Continent)
 ci.dummy <- list()
 for(i in names(tmp)) {
@@ -850,23 +912,50 @@ for(i in names(tmp)) {
 }
 
 ci.dummy <- rbindlist(ci.dummy, idcol = "Continent")
+
+# Compute ci for the dummy parameter (r squared)
+tmp <- split(indices.dummyR, indices.dummyR$Continent)
+ci.dummyR <- list()
+for(i in names(tmp)) {
+  ci.dummyR[[i]] <- sobol_ci_dummy(tmp[[i]], 
+                                  type = type, 
+                                  conf = conf)
+}
+
+ci.dummyR <- rbindlist(ci.dummyR, idcol = "Continent")
 ```
 
 ```{r plot_sobol, cache=TRUE, dependson="ci", dev="tikz", fig.cap="Sobol' indices."}
 
 # PLOT SOBOL' INDICES ---------------------------------------------------------
 
-plot_sobol(ci, type = 1, dummy = ci.dummy) + 
-         facet_wrap(~Continent, ncol = 4) + 
-         theme(aspect.ratio = 1)
+a <- plot_sobol(ciR, type = 1, dummy = ci.dummyR) + 
+  facet_wrap(~Continent, ncol = 4) + 
+  labs(x = "", 
+       y = "Sobol' index") +
+  theme(legend.position = "none")
+
+
+b <- plot_sobol(ci, type = 1, dummy = ci.dummy) + 
+  facet_wrap(~Continent, ncol = 4) + 
+  labs(x = "", 
+       y = "Sobol' index") +
+  theme(legend.position = "none")
+
+legend <- get_legend(a + theme(legend.position = "top"))
+
+all <- plot_grid(a, b, ncol = 1, align = "hv", labels = "auto")
+
+plot_grid(legend, all, ncol = 1,  rel_heights = c(0.1, 1))
 ```
 
 ```{r sum_si, cache=TRUE, dependson="ci"}
 
 # CHECK SUM OF FIRST-ORDER INDICES --------------------------------------------
 
-ci[sensitivity == "Si"] %>%
-  .[, sum(original), Continent]
+lapply(list(ci, ciR), function(x) 
+  x[sensitivity == "Si"] %>%
+      .[, sum(original), Continent])
 ```
 
 ```{r plot_sobol_second_third, cache=TRUE, dependson="ci", dev = "tikz", fig.cap="High-order interactions between the triggers."}
@@ -875,6 +964,8 @@ ci[sensitivity == "Si"] %>%
 
 lapply(2:3, function(x) plot_sobol(ci, type = x, dummy = ci.dummy) + 
          facet_wrap(~Continent, ncol = 2) +
+           labs(x = "", 
+                y = "Sobol' index") +
          theme(axis.text.x = element_text(size = 7)))
 ```
 
