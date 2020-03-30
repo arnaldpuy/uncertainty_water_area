@@ -1,8 +1,8 @@
-## ----setup, include=FALSE------------------------------------------------
+## ----setup, include=FALSE-----------------------------------------------
 knitr::opts_chunk$set(echo = TRUE)
 
 
-## ----load_packages, results="hide", message=FALSE, warning=FALSE---------
+## ----load_packages, results="hide", message=FALSE, warning=FALSE--------
 
 # LOAD PACKAGES ---------------------------------------------------------------
 
@@ -21,7 +21,8 @@ loadPackages(c("data.table", "ggplot2", "sensobol", "scales",
                "dplyr", "IDPmisc", "boot", "parallel", 
                "MASS", "doParallel", "complmrob", 
                "mvoutlier", "sandwich", "lmtest", "mice", 
-               "ggridges", "broom", "naniar", "cowplot"))
+               "ggridges", "broom", "naniar", "cowplot", 
+               "tidyr", "benchmarkme"))
 
 # SET CHECKPOINT --------------------------------------------------------------
 
@@ -46,7 +47,7 @@ theme_AP <- function() {
 }
 
 
-## ----functions_data, cache=TRUE------------------------------------------
+## ----functions_data, cache=TRUE-----------------------------------------
 
 # CREATE FUNCTIONS ------------------------------------------------------------
 
@@ -98,13 +99,14 @@ get_nc_data <- function(nc_file) {
 }
 
 
-## ----water_with_dataset, cache=TRUE, warning=FALSE-----------------------
+## ----water_with_dataset, cache=TRUE, warning=FALSE----------------------
 
 # READ IN DATASETS ON IRRIGATION WATER WITHDRAWAL -----------------------------
 
 # FAO data (Table 4) ----------------------------
 # http://www.fao.org/nr/water/aquastat/water_use_agr/IrrigationWaterUse.pdf
 
+# UNIT IS KM3/YEAR
 table4.tmp <- fread("table_4.csv", skip = 3, nrows = 167) %>%
   .[, .(Country, Year, Water.withdrawal)] %>%
   setnames(., "Water.withdrawal", "Water.Withdrawn")
@@ -115,6 +117,7 @@ table4.dt <- country_code(table4.tmp[Year %in% 1999:2012])[
     , Year:= NULL]
 
 # Liu et al. dataset ----------------------------
+#UNIT IS 10^9 m3/year = km3/year
 liu.dt <- fread("liu.csv")[, .(country, irr)] %>%
   setnames(., c("country", "irr"), c("Country", "Water.Withdrawn")) %>%
   country_code(.) %>%
@@ -134,9 +137,8 @@ GHM.dt <- rbindlist(out.nc, idcol = "Water.Dataset") %>%
 
 # ARRANGE THE TOTAL NUMBER OF COUNTRIES ---------------------------------------
 
-# Check how many different countries there are in the water datasets
-DT <- data.table(unique(c(liu.dt[, Country], GHM.dt[, Country], table4.dt[, Country])))
-setnames(DT, "V1", "Country")
+# Read in list of countries in UN
+DT <- fread("UN_countries2.csv", select = "Country")
 
 # Give standard country names, UN codes and link with Continent
 DT <- DT[, `:=` (Code = countrycode(DT[, Country], 
@@ -146,9 +148,8 @@ DT <- DT[, `:=` (Code = countrycode(DT[, Country],
                                          origin = "country.name", 
                                          destination ="continent"))]
 
-DT <- DT[, Country:= countrycode(DT[, Code], 
-                                 origin = "un", 
-                                 destination = "country.name")]
+# Manually add Micronesia
+DT <- DT[, Continent:= ifelse(Country %in% "Micronesia", "Oceania", Continent)]
 
 
 ## ----final_water_dataset, cache=TRUE, dependson=c("water_with_dataset" ,"arrange_total_countries")----
@@ -186,7 +187,7 @@ table4.dt.full <- merge(DT, table4.dt,
 water.dt <- rbind(liu.dt.full, table4.dt.full, GHM.dt.full)
 
 
-## ----area_dataset, cache=TRUE--------------------------------------------
+## ----area_dataset, cache=TRUE-------------------------------------------
 
 # READ IN IRRIGATED AREA DATASETS ---------------------------------------------
 
@@ -205,12 +206,19 @@ irrigated.dt <- melt(meier.dt, measure.vars = irrigated.area.datasets) %>%
             all.y = TRUE), by = variable] %>%
   setnames(., c("variable", "value"), c("Area.Dataset", "Irrigated.Area"))
 
-full.dt <- merge(irrigated.dt, water.dt, on = c("Continent", "Country", "Code"), 
-                 allow.cartesian = TRUE) %>%
+tmp.dt <- merge(irrigated.dt, water.dt, on = c("Continent", "Country", "Code"), 
+                allow.cartesian = TRUE) %>%
   .[!Continent == "Oceania"] # Drop Oceania
 
+# Vector with the countries to drop
+countries.drop <- tmp.dt[Water.Withdrawn == 0 & is.na(Irrigated.Area) == TRUE] %>%
+  .[, unique(Country)]
 
-## ----export.irrigated.dt, cache=TRUE, dependson="merge_with_area"--------
+# Drop the countries
+full.dt <- tmp.dt[!Country %in% countries.drop]
+
+
+## ----export.irrigated.dt, cache=TRUE, dependson="merge_with_area"-------
 
 # EXPORT IRRIGATED AREA DT ----------------------------------------------------
 
@@ -237,7 +245,7 @@ full.dt %>%
         strip.text = element_text(size = 7))
 
 
-## ----log10, cache=TRUE, dependson="merge_with_area"----------------------
+## ----log10, cache=TRUE, dependson="merge_with_area"---------------------
 
 # TRANSFORM DATASET -----------------------------------------------------------
 
@@ -248,7 +256,7 @@ cols_group <- c("Continent", "Area.Dataset", "Water.Dataset")
 full.dt <- full.dt[, (cols):= lapply(.SD, log10), .SDcols = (cols)]
 
 
-## ----export_dataset_log10, cache=TRUE, dependson="log10"-----------------
+## ----export_dataset_log10, cache=TRUE, dependson="log10"----------------
 
 # EXPORT FULL DATASET WITH MISSING VALUES --------------------------------------------
 
@@ -280,6 +288,7 @@ for(i in names(tmp)) {
           strip.text = element_text(size = 7)) +
     ggtitle(names(tmp[i]))
 }
+
 gg
 
 
@@ -330,7 +339,7 @@ ggplot(tmp, aes(md.cla, md.rob,
         strip.text = element_text(size = 7))
 
 
-## ----hetero, cache=TRUE, dependson="merge_with_area"---------------------
+## ----hetero, cache=TRUE, dependson="merge_with_area"--------------------
 
 # CHECK HETEROSKEDASTICITY ----------------------------------------------------
 
@@ -364,7 +373,7 @@ gg
 
 ## ----missing_values, cache=TRUE, dependson="log10", echo=FALSE, message=FALSE, results='hide', warning=FALSE----
 
-# IMPUTATION OF MISSING VALUES ------------------------------------------------
+# IMPUTATION OF MISSING VALUES -------------------------------------------------
 
 # Substitute Inf values for NA
 for (j in 1:ncol(full.dt)) set(full.dt, which(is.infinite(full.dt[[j]])), j, NA)
@@ -382,11 +391,11 @@ imput <- full.dt[, .(Group = lapply(imputation.methods, function(x)
        print = FALSE))), 
   cols_group]
 
-imput <- imput[, Imputation.Method:= rep(imputation.methods, .N / 3)]
+imput <- imput[, Imputation.Method:= rep(imputation.methods, .N / length(imputation.methods))]
 
 # Extract iterations
 imput <- imput[, Datasets:= lapply(Group, function(x) 
-  lapply(1:m.iterations, function(y) data.table(complete(x, y))))] %>%
+  lapply(1:m.iterations, function(y) data.table(mice::complete(x, y))))] %>%
   .[, Data:= lapply(Datasets, function(x) rbindlist(x, idcol = "Iteration"))]
 
 # Vector to loop onto
@@ -406,7 +415,7 @@ full.imput <- imput[, lapply(.SD, unlist),
                     .(Continent, Area.Dataset, Water.Dataset, Imputation.Method)]
 
 
-## ----conduct_lm, cache=TRUE, dependson="missing_values"------------------
+## ----conduct_lm, cache=TRUE, dependson="missing_values"-----------------
 
 # LINEAR REGRESSIONS AND PULL RESIDUALS ---------------------------------------
 
@@ -436,6 +445,7 @@ final.resid <- rbind(resid.dt, resid.dtR)
 ## ----plot_residuals, cache=TRUE, dependson="conduct_lm", fig.height=8, fig.width=6, warning=FALSE----
 
  # PLOT RESIDUALS -------------------------------------------------------------
+
 # function to plot
 gg_bar <- gg_ridge <- list()
 for(i in c("Africa", "Americas", "Asia", "Europe")) {
@@ -478,60 +488,48 @@ gg_ridge
 fwrite(full.imput, "full.imput.csv")
 
 
-## ----compute_beta, cache=TRUE, dependson="missing_values"----------------
+
+## ----compute_beta, cache=TRUE, dependson="missing_values"---------------
 
 # COMPUTE BETA AND R^2 --------------------------------------------------------
 
-results <- full.imput[, .(Normal = coef(lm(Water.Withdrawn ~ Irrigated.Area))[[2]], 
-                          Robust = coef(rlm(Water.Withdrawn ~ Irrigated.Area, maxit = 60))[[2]], 
-                          r.squared = summary(lm(Water.Withdrawn ~ Irrigated.Area))$r.squared), 
-                      all.cols]
+regressions <- full.imput[, .(Normal = coef(lm(Water.Withdrawn ~ Irrigated.Area)), 
+                              Robust = coef(rlm(Water.Withdrawn ~ Irrigated.Area, maxit = 60)), 
+                              r.squared = summary(lm(Water.Withdrawn ~ Irrigated.Area))$r.squared), 
+                      all.cols] 
+
+results <- regressions[, Type:= rep(c("Intercept", "Beta"), times = nrow(.SD) / 2)] %>%
+  melt(., measure.vars = c("Normal", "Robust"), variable.name = "Regression") %>%
+  tidyr::spread(., Type, value) %>%
+  .[, index:= paste(Continent, Area.Dataset, Water.Dataset, Regression, 
+                   Imputation.Method, Iteration, sep = "_")]
 
 
-## ----uncertainty_r2, cache=TRUE, dependson="compute_beta", dev="tikz", fig.height=4, fig.width=4, fig.cap="Uncertainty in the model goodness of fit. All sources of uncertainty have been taken into account except the selection between OLS and OLS robust (trigger X2). Robust OLS does not allow to compue $r^2$."----
 
-# UNCERTAINTY IN R2 -----------------------------------------------------------
-
-results[, .(">90" = sum(r.squared > 0.9) / .N,
-            "75-90" = sum(r.squared > 0.75 & r.squared < 0.9) / .N, 
-            "50-75" = sum(r.squared > 0.50 & r.squared < 0.75) / .N, 
-            "25-50" = sum(r.squared > 0.25 & r.squared < 0.5) / .N), Continent]
-
-results[order(-r.squared), head(.SD, 20), Continent]
-
-# Plot
-ggplot(results, aes(r.squared, 
-                    fill = Continent)) +
-  geom_density(alpha = 0.3) +
-  labs(x = expression(r ^ 2), 
-       y = "Density") +
-  theme_AP() + 
-  theme(legend.position = "top")
-
-
-## ----export_beta_results, cache=TRUE, dependson="compute_beta"-----------
+## ----export_beta_results, cache=TRUE, dependson="compute_beta"----------
 
 # EXPORT BETA AND R^2 RESULTS -------------------------------------------------
+
+results <- regressions[, Type:= rep(c("Intercept", "Beta"), times = nrow(.SD) / 2)] %>%
+  melt(., measure.vars = c("Normal", "Robust"), variable.name = "Regression") %>%
+  spread(., Type, value) %>%
+  .[, index:= paste(Continent, Area.Dataset, Water.Dataset, Regression, 
+                   Imputation.Method, Iteration, sep = "_")]
 
 fwrite(results, "results.csv")
 
 
-## ----lookup, cache=TRUE, dependson="compute_beta"------------------------
+## ----lookup, cache=TRUE, dependson="compute_beta"-----------------------
 
 # CREATE LOOKUP TABLE ---------------------------------------------------------
 
-lookup <- melt(results, measure.vars = c("Normal", "Robust"), 
-     variable.name = "Regression", value.name = "Beta") %>%
-  .[, index:= paste(Continent, Area.Dataset, Water.Dataset, Regression, 
-                    Imputation.Method, Iteration, sep = "_")]
-
-lookup <- setkey(lookup, index)
+lookup <- setkey(results, index)
 
 # Export lookup
 fwrite(lookup, "lookup.csv")
 
 
-## ----set_sample_matrix, cache=TRUE---------------------------------------
+## ----set_sample_matrix, cache=TRUE--------------------------------------
 
 # DEFINE THE SETTINGS OF THE SAMPLE MATRIX ------------------------------------
 
@@ -540,23 +538,22 @@ Continents <- c("Africa", "Americas", "Asia", "Europe")
 # Create a vector with the name of the columns
 parameters <- paste("X", 1:5, sep = "")
 
-# Obtain number of parameters
-k <- length(parameters)
-
 # Select sample size
-n <- 2 ^ 7
+n <- 2 ^ 13
+
+# Define order
+order <- "third"
 
 
-## ----sample_matrix, cache=TRUE, dependson="set_sample_matrix"------------
+## ----sample_matrix, cache=TRUE, dependson="set_sample_matrix"-----------
 
 # CREATE THE SAMPLE MATRIX ----------------------------------------------------
 
 # Create an A, B and AB matrices for each continent
 sample.matrix <- lapply(Continents, function(Continents) 
-  sobol_matrices(n = n,
-                 k = k, 
-                 second = TRUE, 
-                 third = TRUE) %>%
+  sobol_matrices(N = n,
+                 params = parameters,
+                 order = order) %>%
     data.table())
 
 # Name the slots, each is a continent
@@ -600,18 +597,18 @@ sample.matrix.dt <- rbindlist(sample.matrix, idcol = "Continent")
 fwrite(sample.matrix.dt, "sample.matrix.dt.csv")
 
 
-## ----print_matrix)-------------------------------------------------------
+## ----print_matrix)------------------------------------------------------
 
 # PRINT SAMPLE MATRIX ---------------------------------------------------------
 
 print(sample.matrix.dt)
 
 
-## ----define_model, cache=TRUE--------------------------------------------
+## ----define_model, cache=TRUE-------------------------------------------
 
 # THE MODEL -------------------------------------------------------------------
 
-model <- function(X) lookup[.(paste0(X[, 1:6], collapse = "_"))][, c(Beta, r.squared)]
+model <- function(X) lookup[.(paste0(X[, 1:6], collapse = "_"))][, c(Intercept, Beta, r.squared)]
 
 
 ## ----run_model, cache=TRUE, dependson=c("define_model", "set_boot", "lookup", "transform_sample_matrix")----
@@ -636,12 +633,12 @@ Y <- foreach(i=1:nrow(sample.matrix.dt),
 stopCluster(cl)
 
 
-## ----arrange_output, cache=TRUE, dependson="run_model"-------------------
+## ----arrange_output, cache=TRUE, dependson="run_model"------------------
 
 # ARRANGE MODEL OUTPUT -------------------------------------------------------
 
 sample.matrix.dt <- cbind(sample.matrix.dt, data.table(do.call(rbind, Y))) %>%
-  setnames(., c("V1", "V2"), c("Y", "r.squared"))
+  setnames(., c("V1", "V2", "V3"), c("Intercept", "Beta", "r.squared"))
 
 # Select the A and B matrix only (for uncertainty analysis)
 AB.dt <- sample.matrix.dt[, .SD[1:(n * 2)], Continent]
@@ -651,45 +648,76 @@ fwrite(sample.matrix.dt, "sample.matrix.dt.csv")
 fwrite(AB.dt, "AB.dt.csv")
 
 
-## ----plot_uncertainty, cache=TRUE, dependson="arrange_output", dev="tikz", fig.height=4, fig.width=5, fig.cap="Uncertainty in the model output."----
+## ----plot_uncertainty, cache=TRUE, dependson="arrange_output", dev="tikz", fig.height=4, fig.width=5, fig.cap="Uncertainty in the model output. a) Uncertainty in the model goodness of fit. All sources of uncertainty have been taken into account except the selection between OLS and OLS robust (trigger X2). Robust OLS does not allow to compute $r^2$. b) Uncertainty in the slope."----
 
 # PLOT UNCERTAINTY ------------------------------------------------------------
 
 # Plot r2
-a <- ggplot(AB.dt, aes(r.squared, fill = Continent)) + 
-  geom_density(alpha = 0.3) + 
+a <- ggplot(AB.dt, aes(r.squared)) + 
+  geom_histogram(color = "black", fill = "white") + 
   theme_AP() +
   labs(x = expression(r ^ 2), 
        y = "Density") +
-  theme(legend.position = "none")
+  scale_y_continuous(breaks = pretty_breaks(n = 3)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 3)) +
+  facet_wrap(~Continent, ncol = 4) +
+  theme(panel.spacing.x = unit(4, "mm"))
 
 # Plot beta
-b <- ggplot(AB.dt, aes(Y, fill = Continent)) + 
-  geom_density(alpha = 0.3) + 
+b <- ggplot(AB.dt, aes(Beta)) + 
+  geom_histogram(color = "black", fill = "white") + 
   theme_AP() +
   geom_vline(xintercept = 1, 
-             lty = 2) +
+             lty = 2, 
+             color = "red") +
   labs(x = "$\\beta$", 
        y = "") +
-  theme(legend.position = "none")
+  scale_y_continuous(breaks = pretty_breaks(n = 3)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 3)) +
+  facet_wrap(~Continent, ncol = 4) +
+  theme(panel.spacing.x = unit(4, "mm"))
 
-# Extract legend
-legend <- cowplot::get_legend(a + theme(legend.position = "top"))
 
 # Merge
-all <- plot_grid(a, b, ncol = 2, align = "hv", labels = "auto")
-
-plot_grid(legend, all, ncol = 1, rel_heights = c(0.2, 1))
+plot_grid(a, b, ncol = 1, align = "hv", labels = "auto")
 
 
+## ----check_order_r2, cache=TRUE, dependson="arrange_output", fig.height=7, fig.width=4.5----
+
+# CHECK THE COMBINATIONS LEADING TO HIGHEST R2 VALUES (first 200) -------------
+
+# Check min and max of first 200 r.squared values
+AB.dt[order(-r.squared), head(.SD, 200), Continent][
+  , .(min = min(r.squared), max = max(r.squared)), Continent]
+
+# Create plot
+dd <- AB.dt[order(-r.squared), head(.SD, 200), Continent] %>%
+  .[, ID:= paste(X1, X2, X4, X5, sep = "_")] %>%
+  .[, .N, .(Continent, ID)]
+
+tmp <- split(dd, dd$Continent)
+gg <- list()
+for(i in names(tmp)) {
+  gg[[i]] <- ggplot(tmp[[i]], aes(reorder(ID, N), N)) +
+    geom_bar(stat = "identity", 
+             color = "black", 
+             fill = "white") + 
+    coord_flip() +
+    labs(y = expression(italic(N)), 
+         x = "") +
+    theme_AP() +
+    ggtitle(names(tmp[i]))
+}
+
+gg
 
 
-## ----super_sub, cache=TRUE, dependson="arrange_output"-------------------
+## ----super_sub, cache=TRUE, dependson="arrange_output"------------------
 
 # SUPERLINEAR OR SUBLINEAR REGIME? --------------------------------------------
 
-AB.dt[, .(sublinear = sum(Y < 1, na.rm = TRUE) / .N, 
-          superlinear = sum(Y > 1, na.rm = TRUE) / .N), 
+AB.dt[, .(sublinear = sum(Beta < 1, na.rm = TRUE) / .N, 
+          superlinear = sum(Beta > 1, na.rm = TRUE) / .N), 
       Continent]
 
 AB.dt[, .(">90" = sum(r.squared > 0.9) / .N,
@@ -697,23 +725,48 @@ AB.dt[, .(">90" = sum(r.squared > 0.9) / .N,
             "50-75" = sum(r.squared > 0.50 & r.squared < 0.75) / .N, 
             "25-50" = sum(r.squared > 0.25 & r.squared < 0.5) / .N), Continent]
 
-AB.dt[order(-r.squared), head(.SD, 20), Continent]
 
-## ----sensitivity_settings, cache=TRUE------------------------------------
+## ----scatterplots, cache=TRUE, dependson="arrange_output", fig.height=5, fig.width=7----
+
+# PLOT SCATTERPLOTS OF PARAMETERS VS MODEL OUTPUT -----------------------------
+
+AB.dt <- AB.dt[, X5:= factor(X5, levels = as.factor(1:m.iterations))]
+
+scatter.dt <- melt(AB.dt, measure.vars = paste("X", 1:5, sep = "")) %>%
+  .[, Regime:= ifelse(Beta > 1, "Super-linear", "Sub-linear")]
+
+# Beta
+ggplot(scatter.dt, aes(value, Beta, color = Regime)) +
+  geom_point(alpha = 0.3, size = 0.5) +
+  facet_grid(Continent ~ variable,
+             scales = "free_x") +
+  geom_hline(yintercept = 1,
+             lty = 2) +
+  scale_color_manual(values = c("#00BFC4", "#F8766D")) +
+  theme_AP() +
+  labs(x = "", y = expression(beta)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top")
+
+# R squared
+ggplot(scatter.dt, aes(value, r.squared, color = Regime)) +
+  geom_point(alpha = 0.3, size = 0.5) +
+  facet_grid(Continent ~ variable,
+             scales = "free_x") +
+  labs(x = "", 
+       y = expression(italic(r)^2)) +
+  scale_color_manual(values = c("#00BFC4", "#F8766D")) +
+  theme_AP() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top")
+
+
+## ----sensitivity_settings, cache=TRUE-----------------------------------
 
 # SENSITIVITY SETTINGS --------------------------------------------------------
 
 # Number of bootstrap replicas
 R <- 1000
-
-# Sensitivity estimator
-estimator <- "jansen"
-
-# Method to calculate ci
-type <- "norm"
-
-# Confidence interval
-conf <- 0.95
 
 
 ## ----sensitivity, cache=TRUE, dependson=c("arrange_output", "set_sample_matrix")----
@@ -721,116 +774,89 @@ conf <- 0.95
 # SENSITIVITY ANALYSIS --------------------------------------------------------
 
 # Beta
-indices <- sample.matrix.dt[, sobol_indices(Y, 
+indices <- sample.matrix.dt[, sobol_indices(Y = Beta, 
+                                            N = n,
                                             params = parameters, 
+                                            first = "jansen",
                                             R = R, 
-                                            n = n, 
-                                            type = estimator,
+                                            boot = TRUE,
                                             parallel = "multicore", 
                                             ncpus = n_cores, 
-                                            second = TRUE, 
-                                            third = TRUE), 
+                                            order = "third"), 
                             Continent]
 
 # r squared
-indicesR <- sample.matrix.dt[, sobol_indices(r.squared, 
+indicesR <- sample.matrix.dt[, sobol_indices(Y = r.squared, 
+                                             N = n,
                                              params = parameters, 
+                                             first = "jansen",
                                              R = R, 
-                                             n = n, 
-                                             type = estimator,
+                                             boot = TRUE,
                                              parallel = "multicore", 
                                              ncpus = n_cores, 
-                                             second = TRUE, 
-                                             third = TRUE), 
-                            Continent]
+                                             order = "third"), 
+                             Continent]
 
 # Compute Sobol' indices for the dummy parameter (Beta)
-indices.dummy <- sample.matrix.dt[, sobol_dummy(Y, 
+indices.dummy <- sample.matrix.dt[, sobol_dummy(Y = Beta, 
+                                                N = n,
                                                 params = parameters, 
                                                 R = R, 
-                                                n = n, 
+                                                boot = TRUE,
                                                 parallel = "multicore", 
                                                 ncpus = n_cores), 
                                   Continent]
 
 # Compute Sobol' indices for the dummy parameter (r squared)
-indices.dummyR <- sample.matrix.dt[, sobol_dummy(r.squared, 
+indices.dummyR <- sample.matrix.dt[, sobol_dummy(Y = r.squared, 
+                                                 N = n,
                                                  params = parameters, 
                                                  R = R, 
-                                                 n = n, 
+                                                 boot = TRUE,
                                                  parallel = "multicore", 
                                                  ncpus = n_cores), 
-                                  Continent]
+                                   Continent]
 
-## ----ci, cache=TRUE, dependson="sensitivity"-----------------------------
 
-# COMPUTE CONFIDENCE INTERVALS -----------------------------------------------
-
-# Beta
-tmp <- split(indices, indices$Continent)
-ci <- list()
-for(i in names(tmp)) {
-  ci[[i]] <- sobol_ci(tmp[[i]], 
-                      params = parameters,
-                      type = type, 
-                      conf = conf, 
-                      second = TRUE, 
-                      third = TRUE)
-}
-
-ci <- rbindlist(ci, idcol = "Continent") 
-
-# r squared
-tmp <- split(indicesR, indicesR$Continent)
-ciR <- list()
-for(i in names(tmp)) {
-  ciR[[i]] <- sobol_ci(tmp[[i]], 
-                      params = parameters,
-                      type = type, 
-                      conf = conf, 
-                      second = TRUE, 
-                      third = TRUE)
-}
-
-ciR <- rbindlist(ciR, idcol = "Continent") 
-
-# Compute ci for the dummy parameter (Beta)
-tmp <- split(indices.dummy, indices.dummy$Continent)
-ci.dummy <- list()
-for(i in names(tmp)) {
-  ci.dummy[[i]] <- sobol_ci_dummy(tmp[[i]], 
-                                  type = type, 
-                                  conf = conf)
-}
-
-ci.dummy <- rbindlist(ci.dummy, idcol = "Continent")
-
-# Compute ci for the dummy parameter (r squared)
-tmp <- split(indices.dummyR, indices.dummyR$Continent)
-ci.dummyR <- list()
-for(i in names(tmp)) {
-  ci.dummyR[[i]] <- sobol_ci_dummy(tmp[[i]], 
-                                  type = type, 
-                                  conf = conf)
-}
-
-ci.dummyR <- rbindlist(ci.dummyR, idcol = "Continent")
-
-## ----plot_sobol, cache=TRUE, dependson="ci", dev="tikz", fig.cap="Sobol' indices."----
+## ----plot_sobol, cache=TRUE, dependson="ci", dev="tikz", fig.cap="Sobol' indices.", fig.width = 5----
 
 # PLOT SOBOL' INDICES ---------------------------------------------------------
 
-a <- plot_sobol(ciR, type = 1, dummy = ci.dummyR) + 
-  facet_wrap(~Continent, ncol = 4) + 
-  labs(x = "", 
+a <- ggplot(indices[sensitivity %in% c("Si", "Ti")], aes(parameters, original, fill = sensitivity)) +
+  geom_bar(stat = "identity",
+           position = position_dodge(0.6),
+           color = "black") +
+  geom_errorbar(aes(ymin = low.ci,
+                    ymax = high.ci),
+                position = position_dodge(0.6)) +
+  scale_y_continuous(breaks = pretty_breaks(n = 3)) +
+  facet_wrap(~Continent,
+             ncol = 4) +
+  labs(x = "",
        y = "Sobol' index") +
+  scale_fill_discrete(name = "Sobol' indices",
+                      labels = c(expression(S[italic(i)]),
+                                 expression(T[italic(i)]))) +
+  theme_AP() +
   theme(legend.position = "none")
 
 
-b <- plot_sobol(ci, type = 1, dummy = ci.dummy) + 
-  facet_wrap(~Continent, ncol = 4) + 
-  labs(x = "", 
+b <- ggplot(indicesR[sensitivity %in% c("Si", "Ti")], aes(parameters, original, fill = sensitivity)) +
+  geom_bar(stat = "identity",
+           position = position_dodge(0.6),
+           color = "black") +
+  geom_errorbar(aes(ymin = low.ci,
+                    ymax = high.ci),
+                position = position_dodge(0.6)) +
+  scale_y_continuous(breaks = pretty_breaks(n = 3)) +
+  facet_wrap(~Continent,
+             ncol = 4) +
+  labs(x = "",
        y = "Sobol' index") +
+  scale_fill_discrete(name = "Sobol' indices",
+                      labels = c(expression(S[italic(i)]),
+                                 expression(T[italic(i)]))) +
+  theme_AP() +
   theme(legend.position = "none")
 
 legend <- get_legend(a + theme(legend.position = "top"))
@@ -839,47 +865,55 @@ all <- plot_grid(a, b, ncol = 1, align = "hv", labels = "auto")
 
 plot_grid(legend, all, ncol = 1,  rel_heights = c(0.1, 1))
 
-## ----sum_si, cache=TRUE, dependson="ci"----------------------------------
+
+## ----sum_si, cache=TRUE, dependson="ci"---------------------------------
 
 # CHECK SUM OF FIRST-ORDER INDICES --------------------------------------------
 
-lapply(list(ci, ciR), function(x) 
+lapply(list(indices, indicesR), function(x) 
   x[sensitivity == "Si"] %>%
       .[, sum(original), Continent])
+
 
 ## ----plot_sobol_second_third, cache=TRUE, dependson="ci", dev = "tikz", fig.cap="High-order interactions between the triggers."----
 
 # PLOT SOBOL' INDICES (SECOND AND THIRD ORDER) --------------------------------
 
-lapply(2:3, function(x) plot_sobol(ci, type = x, dummy = ci.dummy) + 
-         facet_wrap(~Continent, ncol = 2) +
-           labs(x = "", 
-                y = "Sobol' index") +
-         theme(axis.text.x = element_text(size = 7)))
+lapply(c("Sij", "Sijk"), function(x)
+  ggplot(indices[sensitivity == x], aes(reorder(parameters, original), original)) + 
+  geom_point() + 
+  geom_errorbar(aes(ymin = low.ci, 
+                    ymax = high.ci)) + 
+  facet_wrap(~Continent) +
+  theme_bw() + 
+  labs(x = "", y = "Sobol' index") + 
+  geom_hline(yintercept = 0, lty = 2, color = "red") + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        legend.background = element_rect(fill = "transparent", 
+                                         color = NA), 
+        legend.key = element_rect(fill = "transparent", 
+                                  color = NA), 
+        axis.text.x = element_text(angle = 45, 
+                                   hjust = 1)))
 
 
-## ----session_information-------------------------------------------------
+## ----session_information------------------------------------------------
 
 # SESSION INFORMATION ---------------------------------------------------------
 
 sessionInfo()
 
-scatter.dt <- melt(AB.dt, measure.vars = paste("X", 1:5, sep = "")) %>%
-  .[, Regime:= ifelse(Y > 1, "Super-linear", "Sub-linear")]
+## Return the machine CPU
+cat("Machine: "); print(get_cpu()$model_name)
 
-ggplot(scatter.dt, aes(value, Y, color = Regime)) +
-  geom_point(alpha = 0.3, size = 0.5) +
-  facet_grid(Continent ~ variable, 
-             scales = "free_x") +
-  geom_hline(yintercept = 1, 
-             lty = 2) +
-  scale_color_manual(values = c("#00BFC4", "#F8766D")) +
-  theme_AP() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
-        legend.position = "top")
+## Return number of true cores
+cat("Num cores: "); print(detectCores(logical = FALSE))
 
+## Return number of threads
+cat("Num threads: "); print(detectCores(logical = TRUE))
 
-
-tmp <- split(scatter.dt, scatter.dt$Continent)
+## Return the machine RAM
+cat("RAM: "); print (get_ram()); cat("\n")
 
 
