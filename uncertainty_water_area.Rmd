@@ -376,6 +376,21 @@ for(i in names(tmp)) {
 gg
 ```
 
+```{r plot_missing3, cache=TRUE, dependson="log10", fig.height=3, fig.width=4, dev="tikz"}
+
+# PLOT PERCENTAGE OF MISSING 2 ------------------------------------------------
+
+full.dt[, sum(is.na(.SD) == TRUE) / .N, 
+        .(Continent, Area.Dataset, Water.Dataset), 
+        .SDcols = c("Irrigated.Area", "Water.Withdrawn")] %>%
+  .[order(-V1)] %>%
+  ggplot(., aes(V1)) +
+  geom_histogram() +
+  labs(x = "Missing values (\\%)", 
+       y = "Count") +
+  facet_wrap(~Continent) +
+  theme_AP()
+```
 
 
 ## Assesment of uncertainties in the model structure
@@ -464,7 +479,7 @@ for (j in 1:ncol(full.dt)) set(full.dt, which(is.infinite(full.dt[[j]])), j, NA)
 full.dt[, lapply(.SD, function(x) sum(is.infinite(x)))] # Check
 
 # Imputation settings
-m.iterations <- 20
+m.iterations <- 40
 imputation.methods <- c("rf", "norm.boot", "norm.nob")
 set.seed(10) # Set seed to allow for replication
 
@@ -634,7 +649,7 @@ Continents <- c("Africa", "Americas", "Asia", "Europe")
 parameters <- paste("X", 1:5, sep = "")
 
 # Select sample size
-n <- 2 ^ 13
+n <- 2 ^ 14
 
 # Define order
 order <- "third"
@@ -658,7 +673,7 @@ names(sample.matrix) <- Continents
 sample.matrix <- lapply(sample.matrix, setnames, parameters)
 ```
 
-```{r transform_sample_matrix, cache=TRUE, dependson=c("sample_matrix", "set_sample_matrix")}
+```{r transform_sample_matrix, cache=TRUE, dependson=c("sample_matrix", "set_sample_matrix", "missing_values")}
 
 # TRANSFORM THE SAMPLE MATRIX -------------------------------------------------
 
@@ -769,7 +784,7 @@ Here we plot the distribution of $\beta$ for each continent, and calculate the p
 a <- ggplot(AB.dt, aes(r.squared)) + 
   geom_histogram(color = "black", fill = "white") + 
   theme_AP() +
-  labs(x = expression(r ^ 2), 
+  labs(x = expression(italic(r) ^ 2), 
        y = "Density") +
   scale_y_continuous(breaks = pretty_breaks(n = 3)) +
   scale_x_continuous(breaks = pretty_breaks(n = 3)) +
@@ -886,14 +901,16 @@ ggplot(scatter.dt, aes(value, r.squared, color = Regime)) +
 R <- 1000
 ```
 
-```{r sensitivity, cache=TRUE, dependson=c("arrange_output", "set_sample_matrix")}
+```{r sensitivity, cache=TRUE, dependson=c("sensitivity_settings", "arrange_output", "set_sample_matrix")}
 
 # SENSITIVITY ANALYSIS --------------------------------------------------------
+
+parameters.recoded <- c("$X_1$", "$X_2$", "$X_3$", "$X_4$", "$X_5$")
 
 # Beta
 indices <- sample.matrix.dt[, sobol_indices(Y = Beta, 
                                             N = n,
-                                            params = parameters, 
+                                            params = parameters.recoded, 
                                             first = "jansen",
                                             R = R, 
                                             boot = TRUE,
@@ -905,7 +922,7 @@ indices <- sample.matrix.dt[, sobol_indices(Y = Beta,
 # r squared
 indicesR <- sample.matrix.dt[, sobol_indices(Y = r.squared, 
                                              N = n,
-                                             params = parameters, 
+                                             params = parameters.recoded, 
                                              first = "jansen",
                                              R = R, 
                                              boot = TRUE,
@@ -917,7 +934,7 @@ indicesR <- sample.matrix.dt[, sobol_indices(Y = r.squared,
 # Compute Sobol' indices for the dummy parameter (Beta)
 indices.dummy <- sample.matrix.dt[, sobol_dummy(Y = Beta, 
                                                 N = n,
-                                                params = parameters, 
+                                                params = parameters.recoded, 
                                                 R = R, 
                                                 boot = TRUE,
                                                 parallel = "multicore", 
@@ -927,7 +944,7 @@ indices.dummy <- sample.matrix.dt[, sobol_dummy(Y = Beta,
 # Compute Sobol' indices for the dummy parameter (r squared)
 indices.dummyR <- sample.matrix.dt[, sobol_dummy(Y = r.squared, 
                                                  N = n,
-                                                 params = parameters, 
+                                                 params = parameters.recoded, 
                                                  R = R, 
                                                  boot = TRUE,
                                                  parallel = "multicore", 
@@ -936,7 +953,7 @@ indices.dummyR <- sample.matrix.dt[, sobol_dummy(Y = r.squared,
 ```
 
 
-```{r plot_sobol, cache=TRUE, dependson="ci", dev="tikz", fig.cap="Sobol' indices.", fig.width = 5}
+```{r plot_sobol, cache=TRUE, dependson="sensitivity", dev="tikz", fig.cap="Sobol' indices.", fig.width = 5}
 
 # PLOT SOBOL' INDICES ---------------------------------------------------------
 
@@ -947,6 +964,11 @@ a <- ggplot(indices[sensitivity %in% c("Si", "Ti")], aes(parameters, original, f
   geom_errorbar(aes(ymin = low.ci,
                     ymax = high.ci),
                 position = position_dodge(0.6)) +
+  geom_hline(data = indices.dummy,
+             aes(yintercept = high.ci,
+                 color = sensitivity),
+             lty = 2,
+             show.legend = FALSE) +
   scale_y_continuous(breaks = pretty_breaks(n = 3)) +
   facet_wrap(~Continent,
              ncol = 4) +
@@ -966,6 +988,11 @@ b <- ggplot(indicesR[sensitivity %in% c("Si", "Ti")], aes(parameters, original, 
   geom_errorbar(aes(ymin = low.ci,
                     ymax = high.ci),
                 position = position_dodge(0.6)) +
+  geom_hline(data = indices.dummyR,
+             aes(yintercept = high.ci,
+                 color = sensitivity),
+             lty = 2,
+             show.legend = FALSE) +
   scale_y_continuous(breaks = pretty_breaks(n = 3)) +
   facet_wrap(~Continent,
              ncol = 4) +
@@ -984,7 +1011,7 @@ all <- plot_grid(a, b, ncol = 1, align = "hv", labels = "auto")
 plot_grid(legend, all, ncol = 1,  rel_heights = c(0.1, 1))
 ```
 
-```{r sum_si, cache=TRUE, dependson="ci"}
+```{r sum_si, cache=TRUE, dependson="sensitivity"}
 
 # CHECK SUM OF FIRST-ORDER INDICES --------------------------------------------
 
@@ -993,7 +1020,7 @@ lapply(list(indices, indicesR), function(x)
       .[, sum(original), Continent])
 ```
 
-```{r plot_sobol_second_third, cache=TRUE, dependson="ci", dev = "tikz", fig.cap="High-order interactions between the triggers."}
+```{r plot_sobol_second_third, cache=TRUE, dependson="sensitivity", dev = "tikz", fig.cap="High-order interactions between the triggers."}
 
 # PLOT SOBOL' INDICES (SECOND AND THIRD ORDER) --------------------------------
 

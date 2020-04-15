@@ -217,6 +217,7 @@ countries.drop <- tmp.dt[Water.Withdrawn == 0 & is.na(Irrigated.Area) == TRUE] %
 # Drop the countries
 full.dt <- tmp.dt[!Country %in% countries.drop]
 
+unique(full.dt$Country)
 
 ## ----export.irrigated.dt, cache=TRUE, dependson="merge_with_area"-------
 
@@ -311,6 +312,20 @@ for(i in names(tmp)) {
 }
 
 gg
+
+full.dt[, sum(is.na(.SD) == TRUE) / .N, 
+        .(Continent, Area.Dataset, Water.Dataset), 
+        .SDcols = c("Irrigated.Area", "Water.Withdrawn")] %>%
+  .[order(-V1)] %>%
+  ggplot(., aes(V1)) +
+  geom_histogram() +
+  labs(x = "Missing values (%)", 
+       y = "Count") +
+  facet_wrap(~Continent) +
+  theme_AP()
+
+
+
 
 
 ## ----outliers, cache=TRUE, fig.keep="none", echo=FALSE,results='hide', dependson="log10"----
@@ -414,7 +429,6 @@ full.imput <- imput[, lapply(.SD, unlist),
                     .SDcols = columns_add, 
                     .(Continent, Area.Dataset, Water.Dataset, Imputation.Method)]
 
-
 ## ----conduct_lm, cache=TRUE, dependson="missing_values"-----------------
 
 # LINEAR REGRESSIONS AND PULL RESIDUALS ---------------------------------------
@@ -441,13 +455,12 @@ resid.dtR <- dtR[, lapply(V1, function(x) unlist(x$.resid)), all.cols] %>%
 
 final.resid <- rbind(resid.dt, resid.dtR)
 
-
 ## ----plot_residuals, cache=TRUE, dependson="conduct_lm", fig.height=8, fig.width=6, warning=FALSE----
 
  # PLOT RESIDUALS -------------------------------------------------------------
 
 # function to plot
-gg_bar <- gg_ridge <- list()
+gg_ridge <- list()
 for(i in c("Africa", "Americas", "Asia", "Europe")) {
   country.vector <- final.resid[Continent == i] %>%
     .[order(V1)] %>%
@@ -464,16 +477,6 @@ for(i in c("Africa", "Americas", "Asia", "Europe")) {
                          high = "red", midpoint = 0) +
     labs(x = "Residual", 
          y = "") +
-    theme_AP() + 
-    theme(legend.position = "top")
-  gg_bar[[i]] <- final.resid[Continent == i] %>%
-    .[, sum(V1 > 0) / .N, Country] %>%
-    ggplot(., aes(reorder(Country, V1), V1, 
-                  fill = ..y..)) + 
-    geom_bar(stat = "identity") +
-    coord_flip() + 
-    labs(y = "Residuals > 0 (%)", 
-         x = "") +
     theme_AP() + 
     theme(legend.position = "top")
 }
@@ -500,19 +503,8 @@ regressions <- full.imput[, .(Normal = coef(lm(Water.Withdrawn ~ Irrigated.Area)
 
 results <- regressions[, Type:= rep(c("Intercept", "Beta"), times = nrow(.SD) / 2)] %>%
   melt(., measure.vars = c("Normal", "Robust"), variable.name = "Regression") %>%
-  tidyr::spread(., Type, value) %>%
-  .[, index:= paste(Continent, Area.Dataset, Water.Dataset, Regression, 
-                   Imputation.Method, Iteration, sep = "_")]
-
-
-
-## ----export_beta_results, cache=TRUE, dependson="compute_beta"----------
-
-# EXPORT BETA AND R^2 RESULTS -------------------------------------------------
-
-results <- regressions[, Type:= rep(c("Intercept", "Beta"), times = nrow(.SD) / 2)] %>%
-  melt(., measure.vars = c("Normal", "Robust"), variable.name = "Regression") %>%
-  spread(., Type, value) %>%
+  dcast(., Continent + Area.Dataset + Water.Dataset + Imputation.Method + Iteration +
+          r.squared + Regression ~ Type, value.var = "value") %>%
   .[, index:= paste(Continent, Area.Dataset, Water.Dataset, Regression, 
                    Imputation.Method, Iteration, sep = "_")]
 
@@ -647,7 +639,6 @@ AB.dt <- sample.matrix.dt[, .SD[1:(n * 2)], Continent]
 fwrite(sample.matrix.dt, "sample.matrix.dt.csv")
 fwrite(AB.dt, "AB.dt.csv")
 
-
 ## ----plot_uncertainty, cache=TRUE, dependson="arrange_output", dev="tikz", fig.height=4, fig.width=5, fig.cap="Uncertainty in the model output. a) Uncertainty in the model goodness of fit. All sources of uncertainty have been taken into account except the selection between OLS and OLS robust (trigger X2). Robust OLS does not allow to compute $r^2$. b) Uncertainty in the slope."----
 
 # PLOT UNCERTAINTY ------------------------------------------------------------
@@ -676,7 +667,6 @@ b <- ggplot(AB.dt, aes(Beta)) +
   scale_x_continuous(breaks = pretty_breaks(n = 3)) +
   facet_wrap(~Continent, ncol = 4) +
   theme(panel.spacing.x = unit(4, "mm"))
-
 
 # Merge
 plot_grid(a, b, ncol = 1, align = "hv", labels = "auto")
@@ -773,10 +763,12 @@ R <- 1000
 
 # SENSITIVITY ANALYSIS --------------------------------------------------------
 
+parameters.recoded <- c("$X_1$", "$X_2$", "$X_3$", "$X_4$", "$X_5$")
+
 # Beta
 indices <- sample.matrix.dt[, sobol_indices(Y = Beta, 
                                             N = n,
-                                            params = parameters, 
+                                            params = parameters.recoded, 
                                             first = "jansen",
                                             R = R, 
                                             boot = TRUE,
@@ -788,7 +780,7 @@ indices <- sample.matrix.dt[, sobol_indices(Y = Beta,
 # r squared
 indicesR <- sample.matrix.dt[, sobol_indices(Y = r.squared, 
                                              N = n,
-                                             params = parameters, 
+                                             params = parameters.recoded, 
                                              first = "jansen",
                                              R = R, 
                                              boot = TRUE,
@@ -800,7 +792,7 @@ indicesR <- sample.matrix.dt[, sobol_indices(Y = r.squared,
 # Compute Sobol' indices for the dummy parameter (Beta)
 indices.dummy <- sample.matrix.dt[, sobol_dummy(Y = Beta, 
                                                 N = n,
-                                                params = parameters, 
+                                                params = parameters.recoded, 
                                                 R = R, 
                                                 boot = TRUE,
                                                 parallel = "multicore", 
@@ -810,7 +802,7 @@ indices.dummy <- sample.matrix.dt[, sobol_dummy(Y = Beta,
 # Compute Sobol' indices for the dummy parameter (r squared)
 indices.dummyR <- sample.matrix.dt[, sobol_dummy(Y = r.squared, 
                                                  N = n,
-                                                 params = parameters, 
+                                                 params = parameters.recoded, 
                                                  R = R, 
                                                  boot = TRUE,
                                                  parallel = "multicore", 
@@ -829,6 +821,11 @@ a <- ggplot(indices[sensitivity %in% c("Si", "Ti")], aes(parameters, original, f
   geom_errorbar(aes(ymin = low.ci,
                     ymax = high.ci),
                 position = position_dodge(0.6)) +
+  geom_hline(data = indices.dummy,
+             aes(yintercept = high.ci,
+                 color = sensitivity),
+             lty = 2,
+             show.legend = FALSE) +
   scale_y_continuous(breaks = pretty_breaks(n = 3)) +
   facet_wrap(~Continent,
              ncol = 4) +
@@ -848,6 +845,11 @@ b <- ggplot(indicesR[sensitivity %in% c("Si", "Ti")], aes(parameters, original, 
   geom_errorbar(aes(ymin = low.ci,
                     ymax = high.ci),
                 position = position_dodge(0.6)) +
+  geom_hline(data = indices.dummyR,
+             aes(yintercept = high.ci,
+                 color = sensitivity),
+             lty = 2,
+             show.legend = FALSE) +
   scale_y_continuous(breaks = pretty_breaks(n = 3)) +
   facet_wrap(~Continent,
              ncol = 4) +
@@ -915,5 +917,181 @@ cat("Num threads: "); print(detectCores(logical = TRUE))
 
 ## Return the machine RAM
 cat("RAM: "); print (get_ram()); cat("\n")
+
+
+AB.dt <- fread("AB.dt.csv")
+
+
+
+
+
+# MODEL FOR THE RESIDUALS -----------------------------------------------------
+###############################################################################
+
+final.resid[, index:= paste(Continent, Area.Dataset, Water.Dataset, Method, 
+                            Imputation.Method, Iteration, sep = "_")]
+
+lookup.residuals <- setkey(final.resid, index)
+
+
+model.residuals <- function(X) lookup.residuals[.(paste0(X[, 1:6], collapse = "_"))][, .(Country, V1)]
+
+# RUN THE MODEL---------------------------------------------------------------
+
+# Set number of cores at 75%
+n_cores <- floor(detectCores() * 0.75)
+
+# Create cluster
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+# Run model in parallel
+Y.res <- foreach(i=1:nrow(AB.dt),.packages = "data.table") %dopar%
+  {
+    model.residuals(AB.dt[i])
+  }
+
+# ARRANGE DATA ----------------------------------------------------------------
+
+out <- foreach(i=1:50, .packages = "data.table") %dopar%
+  {
+    cbind(AB.dt[i], Y.res[[i]])
+  }
+
+# Stop parallel cluster
+stopCluster(cl)
+
+countries.dt <- rbindlist(out, idcol = "Row")
+setnames(countries.dt, "V1", "Residual")
+
+# CONDITIONALLY ADD THE IRRIGATED AREA ----------------------------------------
+
+full.imput <- full.imput[, index:= paste(Continent, Area.Dataset, Water.Dataset, 
+                                         Imputation.Method, Iteration, Country, 
+                                         sep = "_")]
+
+full.imput <- setkey(full.imput, index)
+
+model.irrigated.area <- function(X) full.imput[.(paste0(X[, c(2:4, 6:7, 11)], collapse = "_"))][, Irrigated.Area]
+
+# Create cluster
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+# Run model in parallel
+Y.area <- foreach(i=1:nrow(countries.dt),.packages = "data.table", 
+                  .combine = c) %dopar%
+  {
+    model.irrigated.area(countries.dt[i])
+  }
+
+# Stop parallel cluster
+stopCluster(cl)
+
+# ARRANGE DATA AND MODEL OUTPUT -----------------------------------------------
+
+countries.final <- cbind(countries.dt, Y.area)
+
+# Predict
+countries.pred <- countries.final[, water.output:= 10 ^ (Intercept + Beta * Y.area + Residual)]
+
+countries.pred[Country == "Tunisia"]
+
+water.dt[Country == "Tunisia"]
+
+
+
+
+
+
+
+countries.final[Continent == "Zimbabwe"]
+
+
+GHM.dt[Country == "Algeria"]
+
+
+
+
+
+
+
+AB.dt[rep(seq_len(nrow(AB.dt[2])), nrow(Y.res[[2]])), ]
+
+AB.dt[rep(seq_len(nrow(AB.dt[2])), 1),]
+cbind(Y.res[[1]], AB.dt[2])
+
+
+
+out <- list()
+for(i in 1:nrow(AB.dt)) {
+  out[[i]] <- cbind(AB.dt[rep(seq_len(nrow(AB.dt[i, ])), nrow(Y.res[[i]])), ], 
+                    Y.res[[i]])
+  
+}
+
+AB.dt <- rbindlist(out, idcol = "Row")
+setnames(AB.dt, "V1", "Residual")
+
+
+full.imput <- full.imput[, index:= paste(Continent, Area.Dataset, Water.Dataset, 
+                                         Imputation.Method, Iteration, Country, 
+                                         sep = "_")]
+
+full.imput <- setkey(full.imput, index)
+
+model.irrigated.area <- function(X) full.imput[.(paste0(X[, c(2:4, 6:7, 12)], collapse = "_"))][, Irrigated.Area]
+
+# Create cluster
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+# Run model in parallel
+Y.area <- foreach(i=1:nrow(AB.dt),.packages = "data.table", 
+                  .combine = c) %dopar%
+  {
+    model.irrigated.area(AB.dt[i])
+  }
+
+# Stop parallel cluster
+stopCluster(cl)
+
+
+cbind(AB.dt, Y.area)
+
+
+tail(Y.area)
+
+is.na(Y.area)
+
+full.imput[.(paste0(AB.dt[2637824, c(2:4, 6:7, 12)], collapse = "_"))]
+
+
+
+
+
+
+
+
+cols <- names(australia)[-1]
+
+australia <- fread("table_australia.csv")
+
+australia[, (cols):= log10(.SD), .SDcols = cols]
+
+da <- NaRV.omit(australia)
+
+ggplot(da, aes(Irrigated.Area, Irrigation.Deliveries.98.99)) +
+  geom_point() +
+  scale_x_log10() +
+  scale_y_log10()
+
+NaRV.omit()
+
+out <- lm(Irrigated.Area ~ Irrigation.Deliveries.98.99, data = da)
+
+summary(out)
+
+confint(out)
 
 
